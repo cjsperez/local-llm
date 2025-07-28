@@ -1,145 +1,172 @@
-# 🧠 AI Support Agent API – ParkNCharge  
-FastAPI backend for brand-based document Q&A, using LangChain + Ollama.
+# 🧠 Local LLM API with Brand-based RAG Support
 
-## 📡 Base URLs
+A FastAPI-powered local Retrieval-Augmented Generation (RAG) backend that supports multi-brand document ingestion, vector store management, and AI querying using [Ollama](https://ollama.com/).
 
-- **SERVER:** `https://hippo-enabled-wombat.ngrok-free.app`
-- **Public (via Ngrok):** `https://hippo-enabled-wombat.ngrok-free.app`
+## 📦 Features
 
-## 🧪 API Quick Start (JS `fetch`)
+- Health checks
+- Brand creation and context configuration
+- Document upload/delete per brand
+- Vector store management (create/rebuild/delete)
+- AI querying with streaming support
+- Ngrok tunneling for remote access
+- Ollama integration for local LLM inference
+- Shell utilities for deployment and monitoring
 
-### 1. 📁 Upload Document
+---
 
-```js
-const formData = new FormData();
-formData.append('file', fileInput.files[0]);
-
-fetch('{SERVER}/documents/upload/{brand_key}', {
-  method: 'POST',
-  body: formData,
-});
-```
-
-### 2. 🏷️ Create Brand
-
-```js
-fetch('{SERVER}/brands', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    key: '{brand_key}',
-    display_name: 'ParkNCharge',
-    products: ['EV charging', 'E-Scooter Charging', 'Fire Isolator'],
-    support_email: 'support@parkncharge.com',
-    word_limit: 30,
-    off_topic_response: "Sorry, I can't help with that.",
-    corrections: {
-      'Park and charge': 'ParkNCharge',
-      'Park and church': 'ParkNCharge',
-    },
-    prompt_template: "You are {display_name}'s AI assistant. Use this context:\n{context}\nQuestion: {question}\nHistory: {conversation_history}",
-    system_message: "Rules:\n1. Correct: {corrections}\n2. Use 'we'\n3. {word_limit} word limit\n4. Off-topic: '{off_topic_response}'",
-  }),
-});
-```
-
-### 3. 🧠 Create Vector Store
-
-```js
-fetch('{SERVER}/vector_store/create', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    brand_key: '{brand_key}',
-    file_ids: ['your_file_id_here'],
-    recreate: false,
-  }),
-});
-```
-
-### 4. 🔁 Rebuild Vector Store
-
-```js
-fetch('{SERVER}/vector_store/rebuild', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ brand_key: '{brand_key}' }),
-});
-```
-
-### 5. ❌ Delete Brand / File / Vector Store
-
-```js
-fetch('{SERVER}/brands/{brand_key}', { method: 'DELETE' });
-fetch('{SERVER}/documents/{brand_key}/your-file.json', { method: 'DELETE' });
-fetch('{SERVER}/vector_store/delete?brand_key={brand_key}', { method: 'DELETE' });
-```
-
-### 6. 💬 Query AI
-
-#### Standard (non-streamed)
-```js
-fetch('{SERVER}/query', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    question: 'How much is the charging fee?',
-    brand_key: '{brand_key}',
-    thread_id: null,
-  }),
-})
-.then(res => res.json())
-.then(console.log);
-```
-
-#### Streamed (for real-time output)
-```js
-const res = await fetch('{SERVER}/query/stream', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    question: 'List of EV Charger Packages?',
-    brand_key: '{brand_key}',
-    thread_id: null,
-  }),
-});
-
-const reader = res.body.getReader();
-const decoder = new TextDecoder();
-let fullText = '';
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  fullText += decoder.decode(value);
-}
-
-console.log(fullText);
-```
-
-## 🛠️ Server Management
+## 🚀 Quickstart
 
 ### ✅ Health Check
-```js
-fetch('{SERVER}/health').then(res => res.json());
+
+```bash
+curl -X GET http://localhost:4001/health
+curl -X GET https://<your-ngrok-domain>/health
 ```
 
-### 🧠 Restart Ollama
+---
+
+## 🧾 Document Management
+
+### Upload Document
+
+```bash
+curl -X POST -F "file=@/path/to/file.json" http://localhost:4001/documents/upload/<brand_key>
+```
+
+### Delete Document
+
+```bash
+curl -X DELETE http://localhost:4001/documents/<brand_key>/<filename>
+```
+
+---
+
+## 🏷️ Brand Management
+
+### Create Brand
+
+```bash
+curl -X POST http://localhost:4001/brands -H "Content-Type: application/json" -d '{
+  "key": "pnc",
+  "display_name": "ParkNCharge",
+  "products": ["EV charging", "Fire Isolator"],
+  ...
+}'
+```
+
+### Delete Brand
+
+```bash
+curl -X DELETE http://localhost:4001/brands/<brand_key>
+```
+
+---
+
+## 📚 Vector Store
+
+### Create
+
+```bash
+curl -X POST http://localhost:4001/vector_store/create -H "Content-Type: application/json" -d '{
+  "brand_key": "pnc",
+  "file_ids": ["uuid-here"],
+  "recreate": false
+}'
+```
+
+### Rebuild
+
+```bash
+curl -X POST http://localhost:4001/vector_store/rebuild -H "Content-Type: application/json" -d '{
+  "brand_key": "pnc"
+}'
+```
+
+### Delete
+
+```bash
+curl -X DELETE "http://localhost:4001/vector_store/delete?brand_key=pnc"
+```
+
+---
+
+## 💬 Query the Assistant
+
+### Basic Query
+
+```bash
+curl -X POST http://localhost:4001/query -H "Content-Type: application/json" -d '{
+  "question": "What is Fire Isolator?",
+  "brand_key": "pnc"
+}'
+```
+
+### With Conversation Thread
+
+```bash
+curl -X POST http://localhost:4001/query -H "Content-Type: application/json" -d '{
+  "question": "Why did charging stop?",
+  "thread_id": "<uuid>",
+  "brand_key": "pnc"
+}'
+```
+
+---
+
+## 🛠️ Developer Notes
+
+### Start FastAPI server
+
+```bash
+nohup uvicorn server:app --host 0.0.0.0 --port 4001 --workers 4 > output.log 2>&1 &
+```
+
+### Start Ollama
+
 ```bash
 nohup ollama serve > ollama.log 2>&1 &
 ```
 
-### 🔁 Restart API Server
+### Tail Logs
+
+```bash
+sudo tail -f /var/log/fastapi_app/stderr.log
+```
+
+### Restart server manually
+
 ```bash
 ps aux | grep uvicorn
 sudo kill <PID>
-nohup /workspace/localrag/ai-agent/venv/bin/uvicorn server:app --host 0.0.0.0 --port 4001 --workers 4 > output.log 2>&1 &
 ```
 
-## 📄 Dev Workflow (Frontend Guide)
+---
 
-1. **Create brand**
-2. **Upload documents**
-3. **Create vector store using file IDs**
-4. **Use `/query/stream`** for real-time answers
-5. **Maintain `thread_id`** for conversational context
+## 🧰 Deployment Setup (Linux)
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+To restart via Supervisor:
+
+```bash
+supervisorctl restart rag-api
+```
+
+---
+
+## 📄 Sample Document Extractor
+
+```bash
+python ./utils/doc_extractor.py --url "https://www.parkncharge.ph" --output ./sample_docs/doc11.json
+```
+
+---
+
+## 📎 Credits
+
+Built with ❤️ by Mr. Perez

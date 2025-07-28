@@ -1,0 +1,32 @@
+[
+  {
+    "id": "3998e886-1abe-491e-aeb2-67e91755e3c1",
+    "brand": "pnc",
+    "source_type": "pdf",
+    "source": "D:\\CSPEREZ\\PROGRAMS\\PythonProjects\\ai-agent\\data\\documents\\pnc\\3998e886-1abe-491e-aeb2-67e91755e3c1_PNC-Sample1.pdf",
+    "status": "completed",
+    "start_time": "2025-07-24T09:48:40.338720+00:00",
+    "extract_faqs": true,
+    "model": "phi3:latest",
+    "filename": "3998e886-1abe-491e-aeb2-67e91755e3c1_3998e886-1abe-491e-aeb2-67e91755e3c1_PNC-Sample1.pdf",
+    "path": "D:\\CSPEREZ\\PROGRAMS\\PythonProjects\\ai-agent\\data\\documents\\pnc\\3998e886-1abe-491e-aeb2-67e91755e3c1_3998e886-1abe-491e-aeb2-67e91755e3c1_PNC-Sample1.pdf",
+    "size": 196608,
+    "extension": ".pdf",
+    "hash": "e2e73d4a22ba89ea40973b88943d971c",
+    "text_length": 940,
+    "faqs": [
+      {
+        "id": 1,
+        "text": "Model A costs between \u20b1124,000 and \u20b1212,000.",
+        "question": "What is the cost of ParkNcharge's Model A EV Charger?",
+        "category": "pricing",
+        "additional_details": null
+      }
+    ],
+    "faq_count": 1,
+    "faq_file": "D:\\CSPEREZ\\PROGRAMS\\PythonProjects\\ai-agent\\data\\documents\\pnc\\3998e886-1abe-491e-aeb2-67e91755e3c1_faqs.json",
+    "metadata_file": "D:\\CSPEREZ\\PROGRAMS\\PythonProjects\\ai-agent\\data\\documents\\pnc\\3998e886-1abe-491e-aeb2-67e91755e3c1.json",
+    "end_time": "2025-07-24T09:50:01.037611+00:00",
+    "processing_time": 80.698891
+  }
+]
