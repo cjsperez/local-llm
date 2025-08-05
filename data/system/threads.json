@@ -6254,5 +6254,43 @@
         "brand": null
       }
     ]
+  },
+  "4d826d9d-3749-419d-a130-8814c88cb809": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "7efe3422-606a-4482-8677-64e775ec7a32",
+        "content": "What is the cost of Model A EV Charger Package?",
+        "role": "user",
+        "timestamp": "2025-07-30 08:24:02",
+        "brand": null
+      },
+      {
+        "id": "064c625f-b789-477b-b1ac-dc8b9752b32a",
+        "content": "The cost of the Model A EV Charger Package is between \u20b1124,000 and \u20b1212,000, depending on the specific package chosen.",
+        "role": "assistant",
+        "timestamp": "2025-07-30 08:24:23",
+        "brand": null
+      }
+    ]
+  },
+  "9b0f30a0-f04f-4c4c-b860-56f4acb7fdb9": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "71019f05-969e-4a6f-8ddd-694768a2f042",
+        "content": "What is the cost of Model A EV Charger Package?",
+        "role": "user",
+        "timestamp": "2025-07-30 08:29:42",
+        "brand": null
+      },
+      {
+        "id": "37f7843c-ff72-47af-a7b1-d9c19b4b0f85",
+        "content": "The cost of the Model A EV Charger Package is between \u20b1124,000 and \u20b1212,000.",
+        "role": "assistant",
+        "timestamp": "2025-07-30 08:29:43",
+        "brand": null
+      }
+    ]
   }
 }

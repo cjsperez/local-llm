@@ -292,7 +292,7 @@ class QueryProcessor:
                 # Initialize vector stores with retry
                 try:
                     await asyncio.wait_for(
-                        self._initialize_vector_stores(),
+                        self._initialize_vector_stores(brand_key),
                         timeout=30  # Increased timeout
                     )
                 except asyncio.TimeoutError:
@@ -327,23 +327,28 @@ class QueryProcessor:
             finally:
                 self._is_warming = False
 
-    async def _initialize_vector_stores(self) -> bool:
+    async def _initialize_vector_stores(self, brand_key: Optional[str] = None) -> bool:
         """Initialize vector stores with retry logic"""
         for attempt in range(3):
             try:
                 logger.info(f"Initializing vector stores (attempt {attempt+1}/3)")
                 if Config.RECREATE_STORE:
                     VectorStoreManager.delete_vector_store()
+                
+                if brand_key:
+                    VectorStoreManager.get_vector_store(
+                            brand_key=brand_key,
+                            create_if_missing=True
+                        )
+                    return True
                     
-                # Load brand stores
-                brands = DocumentLoader.get_all_brands()
+                brands = DocumentLoader.load_brand_documents(brand_key)
                 for brand in brands:
                     logger.info(f"Brand: {brand}")
                     VectorStoreManager.get_vector_store(
                         brand_key=brand,
                         create_if_missing=True
                     )
-                    
                 return True
             except Exception as e:
                 logger.error(f"Vector store init attempt {attempt+1} failed: {str(e)}")
@@ -837,10 +842,10 @@ class QueryProcessor:
                             metadata = fixed_doc.get('metadata', {}).copy()
                             
                             # Transfer scores from doc level to metadata if they exist
-                            if 'relevance_score' in fixed_doc:
-                                metadata['relevance_score'] = float(fixed_doc['relevance_score'])
-                            if 'question_score' in fixed_doc:
-                                metadata['question_score'] = float(fixed_doc['question_score'])
+                            # if 'relevance_score' in fixed_doc:
+                            #     metadata['relevance_score'] = float(fixed_doc['relevance_score'])
+                            # if 'question_score' in fixed_doc:
+                            #     metadata['question_score'] = float(fixed_doc['question_score'])
                             
                             fixed_doc['metadata'] = metadata
                             fixed_context.append(fixed_doc)
@@ -1193,7 +1198,7 @@ async def health_check():
             
             if checks["documents_available"]:
                 # Let VectorStoreManager handle document loading internally
-                vector_store = VectorStoreManager.get_vector_store(
+                vector_store = await VectorStoreManager.get_vector_store(
                     brand_key="pnc",  # Using 'pnc' as shown in your logs
                     create_if_missing=True
                 )

@@ -107,10 +107,10 @@ class DocumentLoader:
                 return None
                 
             # Extract scores if they exist
-            scores = {
-                'relevance_score': float(item.get('relevance_score', 0)),
-                'question_score': float(item.get('question_score', 0))
-            }
+            # scores = {
+            #     'relevance_score': float(item.get('relevance_score', 0)),
+            #     'question_score': float(item.get('question_score', 0))
+            # }
             
             return {
                 'content': str(item.get('text', '')).strip(),
@@ -124,7 +124,7 @@ class DocumentLoader:
                         for k, v in item.items()
                         if k not in required_fields
                     },
-                    **scores  # Add scores to metadata
+                    # **scores   Add scores to metadata
                 }
             }
         except Exception as e:
@@ -207,6 +207,7 @@ class DocumentLoader:
     def chunk_documents(documents: List[Dict]) -> List[Document]:
         try:
             logger.info("Starting document chunking")
+            logger.info(f"[DOCUMENTS]:\n{documents}")
             if not documents:
                 logger.warning("Empty documents list received")
                 return []
@@ -226,10 +227,7 @@ class DocumentLoader:
                         'category': str(doc.get('category', 'General')),
                         'type': str(doc.get('type', 'faq')),
                         'source': str(doc.get('source', 'unknown')),
-                        'brand': str(doc.get('brand', 'ParkNCharge')),
-                        # Preserve scores
-                        'relevance_score': float(metadata.get('relevance_score', 0)),
-                        'question_score': float(metadata.get('question_score', 0))
+                        'brand': str(doc.get('brand')),
                     }
                     full_metadata = {**core_metadata, **metadata}
                     try:

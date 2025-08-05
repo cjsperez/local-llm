@@ -194,78 +194,81 @@ class RAGSystem:
     def warm_up(self, brand_key: Optional[str] = None, timeout: int = 300) -> bool:
         """Thread-safe warm-up with simplified validation to prevent recursion"""
         current_thread = threading.current_thread()
-        self.logger.info(f"Warm-up started for brand {brand_key} in thread {current_thread.name}")
+        brand_context = f"for brand {brand_key}" if brand_key else "for all brands"
+        self.logger.info(f"Warm-up started {brand_context} in thread {current_thread.name}")
         
         try:
             # Phase 1: Vector Store Initialization
             vector_start = time.time()
             try:
                 self.vector_db = self._safe_load_vector_store(brand_key)
+                self.logger.info(f"[DOCS]: \n{self.vector_db}")
                 if not self.vector_db or not hasattr(self.vector_db, '_collection'):
-                    raise RuntimeError("Vector store initialization failed")
+                    raise RuntimeError(f"Vector store initialization failed {brand_context}")
                     
                 doc_count = self.vector_db._collection.count()
-                self.logger.info(f"Vector store loaded with {doc_count} docs in {time.time()-vector_start:.2f}s")
+                brand_check = f"(brand: {brand_key})" if brand_key else "(all brands)"
+                self.logger.info(f"Vector store loaded with {doc_count} docs {brand_check} in {time.time()-vector_start:.2f}s")
             except Exception as e:
-                self.logger.error(f"Vector store init failed: {str(e)}")
-                raise RuntimeError(f"Vector store initialization failed: {str(e)}")
+                self.logger.error(f"Vector store init failed {brand_context}: {str(e)}")
+                raise RuntimeError(f"Vector store initialization failed {brand_context}: {str(e)}")
 
             # Phase 2: LLM Initialization
             llm_start = time.time()
             try:
                 self.llm = self._init_llm_with_retry(min(30, timeout//2))
                 if not self.llm:
-                    raise RuntimeError("LLM instance creation failed")
+                    raise RuntimeError(f"LLM instance creation failed {brand_context}")
                 
-                # Simple ping test without content validation
+                # Simple ping test
                 try:
                     response = str(self.llm.invoke("ping"))
-                    self.logger.debug(f"LLM response: {response[:100]}...")
+                    self.logger.debug(f"LLM response {brand_context}: {response[:100]}...")
                 except Exception as e:
-                    raise RuntimeError(f"LLM ping failed: {str(e)}")
+                    raise RuntimeError(f"LLM ping failed {brand_context}: {str(e)}")
                     
-                self.logger.info(f"LLM initialized in {time.time()-llm_start:.2f}s")
+                self.logger.info(f"LLM initialized {brand_context} in {time.time()-llm_start:.2f}s")
             except Exception as e:
-                self.logger.error(f"LLM init failed: {str(e)}")
-                raise RuntimeError(f"LLM initialization failed: {str(e)}")
+                self.logger.error(f"LLM init failed {brand_context}: {str(e)}")
+                raise RuntimeError(f"LLM initialization failed {brand_context}: {str(e)}")
 
             # Phase 3: Retriever Initialization
             retriever_start = time.time()
             try:
-                self.retriever = create_retriever(self.vector_db, self.llm)
+                # Explicitly pass brand_key to retriever creation
+                self.retriever = create_retriever(self.vector_db, self.llm, brand_key=brand_key)
                 if not self.retriever:
-                    raise RuntimeError("Retriever creation failed")
-                self.logger.info(f"Retriever created in {time.time()-retriever_start:.2f}s")
+                    raise RuntimeError(f"Retriever creation failed {brand_context}")
+                self.logger.info(f"Retriever created {brand_context} in {time.time()-retriever_start:.2f}s")
             except Exception as e:
-                self.logger.error(f"Retriever creation failed: {str(e)}")
+                self.logger.error(f"Retriever creation failed {brand_context}: {str(e)}")
                 raise
 
-            # Phase 4: Chain Initialization (Simplified)
+            # Phase 4: Chain Initialization
             chain_start = time.time()
             try:
-                # Create chain without immediate invocation
                 with self._initialization_lock:
-                    self.chain = create_rag_chain( self.llm, brand_key)
+                    self.chain = create_rag_chain(self.llm, brand_key)
                     if not self.chain:
-                        raise RuntimeError("Chain creation failed")
+                        raise RuntimeError(f"Chain creation failed {brand_context}")
                         
-                self.logger.info(f"Chain created in {time.time()-chain_start:.2f}s")
+                self.logger.info(f"Chain created {brand_context} in {time.time()-chain_start:.2f}s")
             except Exception as e:
-                self.logger.error(f"Chain creation failed: {str(e)}")
-                raise RuntimeError(f"Chain initialization failed: {str(e)}")
+                self.logger.error(f"Chain creation failed {brand_context}: {str(e)}")
+                raise RuntimeError(f"Chain initialization failed {brand_context}: {str(e)}")
 
             # Final readiness check
             self.__class__._is_ready = True
             self.create_cache_file()
             total_time = time.time() - vector_start
-            self.logger.info(f"Warm-up completed successfully in {total_time:.2f}s")
+            self.logger.info(f"Warm-up completed successfully {brand_context} in {total_time:.2f}s")
             return True
 
         except Exception as e:
-            self.logger.error(f"Warm-up failed: {str(e)}", exc_info=True)
+            self.logger.error(f"Warm-up failed {brand_context}: {str(e)}", exc_info=True)
             self._cleanup()
-            raise RuntimeError(f"Warm-up failed: {str(e)}")
-
+            raise RuntimeError(f"Warm-up failed {brand_context}: {str(e)}")
+        
     def _init_llm_with_retry(self, timeout, max_retries=2):
         """LLM initialization with retry logic"""
         for attempt in range(1, max_retries+1):

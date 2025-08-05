@@ -106,7 +106,7 @@ class DocumentInfo(BaseModel):
 class VectorStoreOperationRequest(BaseModel):
     brand_key: str
     file_ids: List[str] = Field(default_factory=list)
-    recreate: bool = False
+    recreate: Optional[bool] = False
 
 class VectorStoreStatusResponse(BaseModel):
     exists: bool
@@ -592,85 +592,6 @@ async def list_documents(brand_key: str):
                 error=str(e)
             ).model_dump()
         )
-
-@app.delete("/documents/{brand_key}/{document_id}", response_model=SuccessResponse)
-async def delete_document(brand_key: str, document_id: str):
-    """Delete a document by its ID"""
-    if not brand_exists(brand_key):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ErrorResponse(
-                status="error",
-                message="Brand not found",
-                error=f"Brand '{brand_key}' doesn't exist"
-            ).model_dump()
-        )
-
-    try:
-        # 1. Load current document list
-        with open(Config.DOCUMENT_LIST, 'r', encoding='utf-8') as f:
-            current_list = json.load(f)
-        
-        # 2. Find document to delete
-        doc_to_delete = None
-        for doc in current_list:
-            if doc.get('id') == document_id and doc.get('brand') == brand_key:
-                doc_to_delete = doc
-                break
-        
-        if not doc_to_delete:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=ErrorResponse(
-                    status="error",
-                    message="Document not found",
-                    error=f"Document with ID '{document_id}' not found in brand '{brand_key}'"
-                ).model_dump()
-            )
-
-        # 3. Get file path and validate
-        file_path = Path(doc_to_delete['path'])
-        if not file_path.exists():
-            logger.warning(f"Document file not found at {file_path}, proceeding with metadata deletion")
-
-        # 4. Update document list
-        updated_list = [doc for doc in current_list if not (doc.get('id') == document_id and doc.get('brand') == brand_key)]
-        
-        # 5. Update brand documents (if still using this)
-        paths_updated = remove_from_brand_documents(brand_key, str(file_path))
-
-        # 6. Delete physical file if it exists
-        file_deleted = False
-        if file_path.exists():
-            file_path.unlink()
-            file_deleted = True
-
-        # 7. Save updated document list
-        with open(Config.DOCUMENT_LIST, 'w', encoding='utf-8') as f:
-            json.dump(updated_list, f, indent=2)
-
-        return SuccessResponse(
-            status="success",
-            message=f"Document '{document_id}' deleted from brand '{brand_key}'",
-            data={
-                "document_id": document_id,
-                "file_deleted": file_deleted,
-                "paths_updated": paths_updated,
-                "filename": doc_to_delete.get('filename', 'unknown')
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Document deletion failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorResponse(
-                status="error",
-                message="Document deletion failed",
-                error=str(e)
-            ).model_dump()
-        )
     
 # ================ Document Processing Endpoints ================
 @app.post("/documents/process", status_code=status.HTTP_202_ACCEPTED)
@@ -765,59 +686,85 @@ async def get_processing_status(processing_id: str):
 @app.get("/documents/{brand_key}/{document_id}", response_model=SuccessResponse)
 async def get_document(brand_key: str, document_id: str):
     try:
-        documents = json.loads(Config.DOCUMENT_LIST.read_text())
+        # Load document list
+        with open(Config.DOCUMENT_LIST, 'r', encoding='utf-8') as f:
+            documents = json.load(f)
+        
+        # Find the specific document
         doc = next((d for d in documents if d.get("id") == document_id and d.get("brand") == brand_key), None)
         
         if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document {document_id} not found for brand {brand_key}"
+            )
 
-        # Debug: Log the document path
+        # Debug logging
         logger.info(f"Processing document with path: {doc.get('path')}")
-        
         if "path" in doc:
-            try:
-                doc_path = Path(doc["path"])
-                # Debug: Log the document path details
-                logger.info(f"Document path details - exists: {doc_path.exists()}, is_file: {doc_path.is_file()}")
-                logger.info(f"Looking for FAQ file at: {doc_path}")
-                logger.info(f"FAQ path exists: {doc_path.exists()}")
+            doc_path = Path(doc["path"])
+            logger.info(f"Document path details - exists: {doc_path.exists()}, is_file: {doc_path.is_file()}")
+            
+            # Check for FAQ file
+            if "faq_file" in doc:
+                faq_path = Path(doc["faq_file"])
+                logger.info(f"Looking for FAQ file at: {faq_path}")
+                logger.info(f"FAQ path exists: {faq_path.exists()}")
                 
-                if doc_path.exists():
+                if faq_path.exists():
                     logger.info("FAQ file found, attempting to read...")
-                    with open(doc_path, "r", encoding="utf-8") as f:
-                        faq_data = json.load(f)
-                        logger.info(f"Raw FAQ data loaded: {faq_data[:1]}")  # Log first item
-                        
-                        doc["faqs"] = [
-                            {
-                                "id": item.get("id"),
-                                "question": item.get("question"),
-                                "text": item.get("text"),
-                                "category": item.get("category"),
-                                "details": item.get("additional_details")
-                            }
-                            for item in faq_data
-                        ]
-                        logger.info(f"Processed {len(doc['faqs'])} FAQ items")
-                else:
-                    logger.warning("No FAQ file found at expected location")
-                    doc["faqs"] = None
-                    
-            except Exception as e:
-                logger.error(f"Error processing FAQ data: {str(e)}", exc_info=True)
-                doc["faqs_error"] = str(e)
+                    try:
+                        with open(faq_path, "r", encoding="utf-8") as f:
+                            faq_data = json.load(f)
+                            
+                            # Handle both list and dict formats safely
+                            if isinstance(faq_data, dict):
+                                if "faqs" in faq_data:
+                                    # New format with metadata
+                                    doc["faqs"] = faq_data["faqs"]
+                                    logger.info(f"Found {len(faq_data['faqs'])} FAQs in structured format")
+                                else:
+                                    # Unexpected dict format
+                                    doc["faqs"] = [faq_data]
+                                    logger.warning("Found single FAQ in dict format")
+                            elif isinstance(faq_data, list):
+                                # Direct list of FAQs
+                                doc["faqs"] = faq_data
+                                logger.info(f"Found {len(faq_data)} FAQs in list format")
+                            else:
+                                logger.error(f"Unexpected FAQ data format: {type(faq_data)}")
+                                doc["faqs_error"] = "Unexpected FAQ data format"
+                            
+                            # Safe logging of FAQ data
+                            if "faqs" in doc:
+                                sample = doc["faqs"][0] if len(doc["faqs"]) > 0 else "Empty FAQ list"
+                                logger.info(f"FAQ data sample: {json.dumps(sample, indent=2)[:500]}...")
+                    except Exception as e:
+                        logger.error(f"Error reading FAQ file: {str(e)}", exc_info=True)
+                        doc["faqs_error"] = str(e)
+            else:
+                logger.info("No FAQ file reference found in document metadata")
 
-        return SuccessResponse(status="success", data=doc)
+        return SuccessResponse(
+            status="success",
+            data=doc
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Document retrieval failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve document: {str(e)}"
+        )
 
 @app.delete("/documents/{brand_key}/{document_id}", response_model=SuccessResponse)
 async def delete_document(brand_key: str, document_id: str):
     """
-    Delete a document and its associated data
+    Delete a document and all its associated files with enhanced error handling
     """
     try:
+        # 1. Verify document exists in registry
         documents = json.loads(Config.DOCUMENT_LIST.read_text())
         doc = next((d for d in documents if d.get("id") == document_id and d.get("brand") == brand_key), None)
         
@@ -827,24 +774,87 @@ async def delete_document(brand_key: str, document_id: str):
                 detail=f"Document {document_id} not found for brand {brand_key}"
             )
 
-        # Remove physical file if it exists
-        if "path" in doc and Path(doc["path"]).exists():
-            Path(doc["path"]).unlink()
+        # 2. Prepare file paths to delete
+        brand_dir = Config.get_brand_dir(brand_key)
+        files_to_delete = set()
+        
+        # Add explicitly referenced files
+        if "path" in doc:
+            files_to_delete.add(Path(doc["path"]))
+        
+        # Add all files matching document ID pattern
+        files_to_delete.update(brand_dir.glob(f"{document_id}*"))
+        
+        # Add known companion files (from your example)
+        companion_files = [
+            f"{document_id}_faqs.json",
+            f"{document_id}_llm_raw.json",
+            f"{document_id}_metadata.json",
+            f"{document_id}_raw_text.txt"
+        ]
+        files_to_delete.update(brand_dir / f for f in companion_files)
+        
+        # 3. Delete files with verification
+        deletion_report = []
+        for file_path in files_to_delete:
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+                    # Verify deletion
+                    if file_path.exists():
+                        raise RuntimeError(f"File still exists after deletion: {file_path}")
+                    deletion_report.append({
+                        "file": str(file_path),
+                        "status": "deleted",
+                        "size": file_path.stat().st_size if file_path.exists() else 0
+                    })
+                    logger.info(f"Successfully deleted {file_path}")
+                else:
+                    deletion_report.append({
+                        "file": str(file_path),
+                        "status": "not_found"
+                    })
+            except Exception as e:
+                deletion_report.append({
+                    "file": str(file_path),
+                    "status": "failed",
+                    "error": str(e)
+                })
+                logger.error(f"Failed to delete {file_path}: {str(e)}")
 
-        # Remove from document list
+        # 4. Update document registries
+        # Remove from main document list
         updated_docs = [d for d in documents if not (d.get("id") == document_id and d.get("brand") == brand_key)]
         Config.DOCUMENT_LIST.write_text(json.dumps(updated_docs, indent=2))
+        
+        # Remove from brand-specific index
+        remove_from_brand_documents(brand_key, document_id)
 
-        # Remove from brand documents
-        remove_from_brand_documents(brand_key, Path(doc["path"]))
+        # 5. Verify at least the main file was deleted
+        main_file_deleted = any(
+            report["status"] == "deleted" and str(doc.get("path", "")) in report["file"]
+            for report in deletion_report
+        )
+        
+        if not main_file_deleted and "path" in doc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Main document file {doc['path']} could not be deleted"
+            )
 
         return SuccessResponse(
             status="success",
-            message=f"Document {document_id} deleted",
-            data={"document_id": document_id}
+            message=f"Document cleanup completed for {document_id}",
+            data={
+                "document_id": document_id,
+                "deletion_report": deletion_report,
+                "files_deleted": sum(1 for r in deletion_report if r["status"] == "deleted"),
+                "files_failed": sum(1 for r in deletion_report if r["status"] == "failed")
+            }
         )
+        
     except Exception as e:
-        logger.error(f"Document deletion failed: {str(e)}")
+        logger.error(f"Document deletion failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -1082,7 +1092,7 @@ async def delete_vector_store(brand_key: Optional[str] = None):
                 detail="brand_key is required"
             )
             
-        success = VectorStoreManager.delete_vector_store(brand_key)
+        success = await VectorStoreManager.clear_vector_store(brand_key)
         
         return SuccessResponse(
             status="success" if success else "error",
@@ -1106,6 +1116,7 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
         from vector_store import VectorStoreManager
         from data_loader import DocumentLoader
         import datetime
+        import os
         
         logger.info(f"Starting vector store rebuild for brand: {request.brand_key}")
         
@@ -1132,10 +1143,22 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
                 detail=f"No matching documents found for brand '{request.brand_key}'"
             )
 
-        # Force clean first
+        # Force clean first with enhanced error handling
         logger.info("Cleaning up existing stores...")
-        VectorStoreManager.cleanup_stores()
-        
+        try:
+            if request.recreate:
+                logger.info("Force deleting existing vector store...")
+                if not VectorStoreManager.clear_vector_store(request.brand_key):
+                    raise RuntimeError("Failed to delete existing vector store")
+            else:
+                logger.info("Retaining existing store folder for overwrite (safe mode)")
+        except Exception as e:
+            logger.error(f"Cleanup failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Cleanup failed: {str(e)}"
+            )
+
         # Process documents using the unified processor
         processed_docs = []
         for doc_info in brand_docs:
@@ -1155,13 +1178,39 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
 
         logger.info(f"Loaded {len(processed_docs)} documents")
         
-        # Recreate store
+        # Recreate store with enhanced error handling
         logger.info("Creating vector store...")
-        store = VectorStoreManager.create_vector_store(
-            documents=processed_docs,
-            brand_key=request.brand_key, 
-            recreate=True  # Force rebuild
-        )
+        try:
+            store = await VectorStoreManager.create_vector_store(
+                documents=processed_docs,
+                brand_key=request.brand_key, 
+                recreate=True  # Force rebuild
+            )
+        except Exception as e:
+            logger.error(f"Store creation failed: {str(e)}")
+            # Check if this is a permission error
+            if "readonly database" in str(e).lower():
+                # Try to fix permissions and retry once
+                try:
+                    store_path = Config.get_brand_vector_store_path(request.brand_key)
+                    os.chmod(store_path, 0o777)
+                    logger.info(f"Retrying after setting permissions on {store_path}")
+                    store = await VectorStoreManager.create_vector_store(
+                        documents=processed_docs,
+                        brand_key=request.brand_key,
+                        recreate=True
+                    )
+                except Exception as retry_error:
+                    logger.error(f"Retry failed: {str(retry_error)}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to create store after permission fix: {str(retry_error)}"
+                    )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Store creation failed: {str(e)}"
+                )
         
         # Explicitly set modification time
         try:
@@ -1169,7 +1218,7 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
             if config.persist_path.exists():
                 mod_time = datetime.datetime.fromisoformat(current_time).timestamp()
                 os.utime(config.persist_path, (mod_time, mod_time))
-                logger.debug(f"Set rebuild modification time: {current_time}")
+                logger.info(f"Set rebuild modification time: {current_time}")
         except Exception as e:
             logger.warning(f"Couldn't set modification time: {str(e)}")
 
@@ -1177,7 +1226,7 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
             "document_count": len(processed_docs),
             "brand": request.brand_key,
             "file_ids": [doc.get("id") or doc.get("hash") for doc in brand_docs],
-            "last_modified": current_time  # Include in response
+            "last_modified": current_time
         }
         
         try:
@@ -1190,6 +1239,8 @@ async def rebuild_vector_store(request: VectorStoreOperationRequest):
             message=f"Rebuilt store for {request.brand_key}",
             data=store_info
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Rebuild failed: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -1258,12 +1309,12 @@ async def _create_store_task(
             # Clean up existing store if recreation requested
             if recreate and attempt == 1:
                 logger.info(f"Cleaning existing store for brand '{brand_key}'")
-                VectorStoreManager.clean_brand_store(brand_key)
+                VectorStoreManager.clear_vector_store(brand_key)
             
             logger.info(f"Attempt {attempt}/{max_retries} to create vector store for '{brand_key}'")
             
             # Create the vector store
-            store = VectorStoreManager.create_vector_store(
+            store = await VectorStoreManager.create_vector_store(
                 documents=documents,
                 brand_key=brand_key,
                 recreate=recreate
@@ -1280,7 +1331,7 @@ async def _create_store_task(
                     if config.persist_path.exists():
                         mod_time = datetime.datetime.fromisoformat(modification_time).timestamp()
                         os.utime(config.persist_path, (mod_time, mod_time))
-                        logger.debug(f"Set explicit modification time: {modification_time}")
+                        logger.info(f"Set explicit modification time: {modification_time}")
                 except Exception as e:
                     logger.warning(f"Couldn't set modification time: {str(e)}")
             
@@ -1295,7 +1346,7 @@ async def _create_store_task(
             # Special handling for database schema errors
             if "no such table: tenants" in str(e):
                 logger.info("Detected database schema issue, performing cleanup...")
-                VectorStoreManager.clean_brand_store(brand_key)
+                VectorStoreManager.clear_vector_store(brand_key)
             
             if attempt < max_retries:
                 logger.info(f"Retrying in {retry_delay} seconds...")
@@ -1314,12 +1365,13 @@ async def _process_document_task(
     extract_faqs: bool,
     model: str
 ):
-    """Handles document processing with intelligent partial success handling"""
+    """Enhanced document processing with comprehensive error handling and debugging"""
     from utils.doc_extractor import (
         extract_text_from_pdf,
         extract_text_from_url,
         ask_ollama,
         clean_llm_output,
+        validate_qa_structure,
         logger as doc_logger
     )
     
@@ -1332,65 +1384,76 @@ async def _process_document_task(
         "status": "processing",
         "start_time": datetime.now(timezone.utc).isoformat(),
         "extract_faqs": extract_faqs,
-        "model": model
+        "model": model,
+        "debug": {}  # Container for debug information
     }
-    created_files = []  # Track all files we create
+    created_files = []  # Track all created files
 
-    def cleanup_files():
-        """Remove all created files and update tracking"""
+    def cleanup_files(force=False):
+        """Remove created files with option to preserve for debugging"""
+        if not force and doc_info.get("status") in ("failed", "partially_completed"):
+            doc_logger.info("Preserving files for debugging")
+            return
+            
         for file_path in created_files:
             try:
                 if Path(file_path).exists():
                     Path(file_path).unlink()
-                    doc_logger.info(f"Deleted file: {file_path}")
+                    doc_logger.debug(f"Deleted file: {file_path}")
             except Exception as e:
                 doc_logger.error(f"Failed to delete {file_path}: {str(e)}")
         
-        # Remove from brand_documents.json
-        try:
-            brand_docs_path = Config.DATA_DIR / "brand_documents.json"
-            if brand_docs_path.exists():
-                with open(brand_docs_path, "r") as f:
-                    brand_docs = json.load(f)
-                
-                if brand_key in brand_docs:
-                    brand_docs[brand_key] = [
-                        p for p in brand_docs[brand_key] 
-                        if str(processing_id) not in p
-                    ]
-                    
-                    with open(brand_docs_path, "w") as f:
-                        json.dump(brand_docs, f, indent=2)
-        except Exception as e:
-            doc_logger.error(f"Failed to update brand_documents: {str(e)}")
-        
-        # Remove from document_list.json
-        try:
-            doc_list_path = Config.DOCUMENT_LIST
-            if doc_list_path.exists():
-                with open(doc_list_path, "r") as f:
-                    docs = json.load(f)
-                
-                docs = [d for d in docs if d.get("id") != processing_id]
-                
-                with open(doc_list_path, "w") as f:
-                    json.dump(docs, f, indent=2)
-        except Exception as e:
-            doc_logger.error(f"Failed to update document_list: {str(e)}")
+        # Update tracking files
+        for file_path, update_fn in [
+            (Config.DATA_DIR / "brand_documents.json", 
+             lambda data: [p for p in data.get(brand_key, []) if str(processing_id) not in p]),
+            (Config.DOCUMENT_LIST,
+             lambda data: [d for d in data if d.get("id") != processing_id])
+        ]:
+            try:
+                if file_path.exists():
+                    with open(file_path, "r+") as f:
+                        data = json.load(f)
+                        updated = update_fn(data)
+                        if file_path.name == "brand_documents.json":
+                            data[brand_key] = updated
+                        else:
+                            data = updated
+                        f.seek(0)
+                        json.dump(data, f, indent=2)
+                        f.truncate()
+            except Exception as e:
+                doc_logger.error(f"Failed to update {file_path.name}: {str(e)}")
+
+    def get_expected_faq_count(text_length: int) -> tuple:
+        """Return min and max expected FAQs based on text length with logging"""
+        if text_length < 800:
+            return (2, 4)
+        elif text_length < 2000:
+            return (4, 8)
+        elif text_length < 5000:
+            return (6, 12)
+        else:
+            return (8, 15)
 
     try:
         brand_dir = Config.get_brand_dir(brand_key)
+        brand_dir.mkdir(exist_ok=True)
         doc_logger.info(f"Processing {source_type.upper()}: {source}")
         
-        # Handle both source types
+        # Handle both source types with enhanced error handling
         if source_type == "pdf":
             if source.startswith("http"):
                 temp_file = Path(tempfile.mktemp(suffix=".pdf"))
                 with open(temp_file, "wb") as f:
-                    f.write(requests.get(source).content)
+                    response = requests.get(source, timeout=30)
+                    response.raise_for_status()
+                    f.write(response.content)
                 source_path = temp_file
             else:
                 source_path = Path(source)
+                if not source_path.exists():
+                    raise FileNotFoundError(f"PDF file not found: {source_path}")
             
             filename = f"{processing_id}_{source_path.name}"
             dest_path = brand_dir / filename
@@ -1406,7 +1469,7 @@ async def _process_document_task(
             })
             
             text = extract_text_from_pdf(str(dest_path))
-        else:  # URL
+        else:  # URL processing
             filename = f"{processing_id}.txt"
             dest_path = brand_dir / filename
             text = extract_text_from_url(source)
@@ -1425,124 +1488,154 @@ async def _process_document_task(
             })
         
         if not text:
-            raise RuntimeError(f"{source_type.upper()} text extraction failed")
+            raise RuntimeError(f"{source_type.upper()} text extraction returned empty content")
         
         doc_logger.info(f"Extracted {len(text)} characters")
         doc_info["text_length"] = len(text)
+        min_expected, max_expected = get_expected_faq_count(len(text))
+        doc_logger.info(f"Expecting {min_expected}-{max_expected} FAQs from this content")
+        doc_info["debug"]["expected_faqs"] = f"{min_expected}-{max_expected}"
 
-        # FAQ Processing with partial success handling
+        # Enhanced FAQ Processing with debugging capabilities
         if extract_faqs and text:
-            faq_file = None
-            validation_errors = []
-            
             try:
                 doc_logger.info("Extracting FAQs...")
+                
+                # Save raw text for debugging
+                raw_text_file = brand_dir / f"{processing_id}_raw_text.txt"
+                with open(raw_text_file, "w", encoding="utf-8") as f:
+                    f.write(text)
+                created_files.append(str(raw_text_file))
+                doc_info["debug"]["raw_text_file"] = str(raw_text_file)
+                
+                # Get LLM response
                 result = ask_ollama(text, model)
-                
                 if not result:
-                    raise RuntimeError("Empty LLM response")
+                    raise RuntimeError("Empty response from LLM")
                 
-                raw_faqs = clean_llm_output(result)
-                if not isinstance(raw_faqs, list):
-                    if isinstance(raw_faqs, dict) and "partial" in raw_faqs:
-                        raw_faqs = raw_faqs["partial"]  # Handle partial output format
-                    else:
-                        raise RuntimeError("LLM output must be a list")
-
-                # Strict validation
-                valid_faqs = []
-                for idx, item in enumerate(raw_faqs, start=1):
-                    try:
-                        if not all(k in item for k in ['text', 'question', 'category']):
-                            raise ValueError(f"Missing required fields in FAQ {idx}")
-                            
-                        valid_faqs.append({
-                            "id": idx,
-                            "text": str(item['text']),
-                            "question": str(item['question']),
-                            "category": str(item['category']),
-                            "additional_details": item.get('additional_details')
-                        })
-                    except Exception as e:
-                        validation_errors.append(str(e))
-
-                # Save results if we got any valid FAQs
+                # Save raw LLM output
+                raw_output_file = brand_dir / f"{processing_id}_llm_raw.json"
+                with open(raw_output_file, "w", encoding="utf-8") as f:
+                    json.dump({"output": result}, f, indent=2)
+                created_files.append(str(raw_output_file))
+                doc_info["debug"]["llm_raw_output"] = str(raw_output_file)
+                
+                # Parse and validate
+                parsed_data = clean_llm_output(result)
+                validation_result = validate_qa_structure(parsed_data, len(text))
+                
+                # Save validation details
+                doc_info.update({
+                    "faq_validation": {
+                        "status": validation_result.get("status"),
+                        "errors": validation_result.get("errors"),
+                        "warnings": validation_result.get("warnings"),
+                        "expected": validation_result.get("expected_range"),
+                        "received": len(validation_result.get("faqs", []))
+                    }
+                })
+                
+                # Process valid FAQs
+                valid_faqs = validation_result.get("faqs", [])
                 if valid_faqs:
                     faq_file = brand_dir / f"{processing_id}_faqs.json"
                     with open(faq_file, "w", encoding="utf-8") as f:
-                        json.dump(valid_faqs, f, indent=2, ensure_ascii=False)
+                        json.dump({
+                            "faqs": valid_faqs,
+                            "metadata": {
+                                "source": source,
+                                "processing_id": processing_id,
+                                "validation": validation_result
+                            }
+                        }, f, indent=2, ensure_ascii=False)
                     created_files.append(str(faq_file))
                     
                     doc_info.update({
                         "faqs": valid_faqs,
                         "faq_count": len(valid_faqs),
-                        "faq_file": str(faq_file)
+                        "faq_file": str(faq_file),
+                        "validation_status": validation_result.get("status")
                     })
-
+                
                 # Handle validation results
-                if validation_errors:
-                    if not valid_faqs:
-                        raise RuntimeError(f"All FAQs invalid: {validation_errors}")
-                    doc_info.update({
-                        "validation_errors": validation_errors,
-                        "status": "partially_completed"
-                    })
-                    doc_logger.warning(f"Completed with {len(valid_faqs)} valid FAQs (errors: {len(validation_errors)})")
-
+                if not validation_result.get("is_acceptable", False):
+                    if valid_faqs:
+                        doc_info["status"] = "partially_completed"
+                        doc_logger.warning(
+                            f"Partial success: Got {len(valid_faqs)} FAQs "
+                            f"(expected {min_expected}-{max_expected}). "
+                            f"Errors: {len(validation_result.get('errors', []))}"
+                        )
+                    else:
+                        raise RuntimeError(
+                            "FAQ extraction failed completely. " +
+                            "\n".join(validation_result.get("errors", ["Unknown error"]))[:500]
+                        )
+                        
             except Exception as e:
-                if 'faqs' in doc_info:  # If we have partial results
-                    doc_info.update({
-                        "status": "partially_completed",
-                        "error": f"Partial success: {str(e)}",
-                        "validation_errors": validation_errors
-                    })
-                    doc_logger.warning(f"Accepted partial results despite failure: {str(e)}")
-                else:
-                    raise
+                doc_logger.error(f"FAQ processing error: {str(e)}", exc_info=True)
+                doc_info["debug"]["faq_error"] = str(e)
+                
+                if "faqs" not in doc_info:
+                    raise RuntimeError(f"FAQ extraction failed: {str(e)}")
+                
+                # If we have partial results, continue with warning
+                doc_info["status"] = "partially_completed"
+                doc_logger.warning(f"Continuing with partial results after error: {str(e)}")
 
-        # Finalize status
+        # Finalize status if not already set
         if doc_info.get("status") == "processing":
             doc_info["status"] = "completed"
 
-        # Create metadata file
-        json_file = brand_dir / f"{processing_id}.json"
-        with open(json_file, "w", encoding="utf-8") as f:
+        # Create comprehensive metadata file
+        metadata_file = brand_dir / f"{processing_id}_metadata.json"
+        with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(doc_info, f, indent=2, ensure_ascii=False)
-        created_files.append(str(json_file))
-        
-        doc_info["metadata_file"] = str(json_file)
+        created_files.append(str(metadata_file))
+        doc_info["metadata_file"] = str(metadata_file)
 
     except Exception as e:
-        if doc_info.get("status") != "partially_completed":
-            doc_info.update({
-                "status": "failed",
-                "error": str(e),
-                "failed_at": datetime.now(timezone.utc).isoformat()
-            })
-            # Only cleanup if no valuable content exists
-            if "faqs" not in doc_info:
-                cleanup_files()
+        doc_logger.error(f"Document processing failed: {str(e)}", exc_info=True)
+        doc_info.update({
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "preserved_files": [str(f) for f in created_files]
+        })
+        
+        # Only cleanup if we have no valuable content at all
+        if "faqs" not in doc_info and "text_length" not in doc_info:
+            cleanup_files(force=True)
         raise
 
     finally:
         # Cleanup temporary files
         if temp_file and temp_file.exists():
-            temp_file.unlink()
+            try:
+                temp_file.unlink()
+            except Exception as e:
+                doc_logger.warning(f"Failed to delete temp file: {str(e)}")
         
         # Finalize timing info
         doc_info["end_time"] = datetime.now(timezone.utc).isoformat()
         if "start_time" in doc_info:
-            doc_info["processing_time"] = (
+            doc_info["processing_time"] = round((
                 datetime.fromisoformat(doc_info["end_time"]) - 
                 datetime.fromisoformat(doc_info["start_time"])
-            ).total_seconds()
+            ).total_seconds(), 2)
 
-        # Update tracking (skip if already cleaned up)
+        # Update tracking if successful
         if doc_info.get("status") in ("completed", "partially_completed"):
-            update_document_list(doc_info)
-            update_brand_documents(brand_key, doc_info.get("path"))
+            try:
+                update_document_list(doc_info)
+                update_brand_documents(brand_key, doc_info.get("path"))
+            except Exception as e:
+                doc_logger.error(f"Failed to update tracking: {str(e)}")
         
-        doc_logger.info(f"Processing {doc_info.get('status', 'unknown')} for {processing_id}")
+        doc_logger.info(
+            f"Processing completed with status: {doc_info.get('status', 'unknown')}. "
+            f"Duration: {doc_info.get('processing_time', 0)}s"
+        )
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

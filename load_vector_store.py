@@ -192,34 +192,6 @@ def _log_windows_solution_hint(store_path: Path) -> None:
         log(f"2. Execute: takeown /F \"{store_path}\" /R /D Y", level="ERROR")
         log(f"3. Execute: icacls \"{store_path}\" /grant \"Users:(OI)(CI)F\" /T", level="ERROR")
 
-def _clean_store_directory(store_path: Path) -> None:
-    """Cross-platform directory cleanup"""
-    if not store_path.exists():
-        return
-
-    for attempt in range(3):
-        try:
-            shutil.rmtree(store_path, ignore_errors=True)
-            if not store_path.exists():
-                return
-
-            _delete_problematic_files(store_path)
-            if not any(store_path.iterdir()):
-                return
-
-            if os.name == 'nt':
-                _windows_force_cleanup(store_path)
-
-            if not store_path.exists() or not any(store_path.iterdir()):
-                return
-
-        except Exception as e:
-            log(f"Cleanup attempt {attempt+1} failed: {str(e)}", 
-                level="WARNING" if attempt < 2 else "ERROR")
-            time.sleep(1 * (attempt + 1))
-
-    log(f"Could not completely clean directory {store_path}", level="WARNING")
-
 def _delete_problematic_files(store_path: Path) -> None:
     """Targeted deletion of known problematic files"""
     problematic_patterns = ["*.lock", "*-wal", "*-shm", "*.parquet"]
