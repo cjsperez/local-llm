@@ -1,0 +1,56 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+
+# Logs and debug files
+*.log
+logs/
+rag_system.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Shell/batch temp or system scripts
+start.sh
+start.bat
+
+# Cache and generated embeddings
+embedding_cache/
+*.pkl
+
+# Model artifacts
+Modelfile
+*.bin
+*.pt
+*.ckpt
+*.safetensors
+
+# Temp files
+temp.json
+tmp_*.py
+*.tmp
+
+# Local data (optional, if not essential to source control)
+data/documents/
+data/embedding_cache/
+data/vector_stores/
+data/vector_stores_backup/
+sample_docs/
+ecosystem.config.js
+fix.py
+get_category.py
+INSTRUCTION.py
+test.py
+
+# Environment & config
+.env
+.env.*
+*.key
+*.token
+
+# Notebook junk
+.ipynb_checkpoints/

@@ -1,0 +1,50 @@
+{
+  "pnc": {
+    "display_name": "ParkNcharge",
+    "products": [
+      "EV charging",
+      "E-Scooter Battery swaps"
+    ],
+    "support_email": "support@parkncharge.com",
+    "word_limit": 50,
+    "corrections": {
+      "Park and charge": "ParkNcharge",
+      "Park and church": "ParkNcharge",
+      "park n charge": "ParkNcharge",
+      "spark and charge": "ParkNcharge",
+      "spite and charge": "ParkNcharge",
+      "bargain change": "ParkNcharge",
+      "spike and charge": "ParkNcharge",
+      "part in charge": "ParkNcharge",
+      "part in choice": "ParkNcharge",
+      "spark engage": "ParkNcharge",
+      "batin cage": "ParkNcharge",
+      "back in touch": "ParkNcharge",
+      "pipe intage": "ParkNcharge",
+      "bike and charge": "ParkNcharge"
+    },
+    "off_topic_response": "Sorry, your question seems unrelated to ParkNcharge and our services so I'm unable to provide an answer about it. If you have other questions related to our services feel free to ask!",
+    "prompt_template": "CONTEXT: {context} QUESTION: {question} SHORT ANSWER:",
+    "system_message": "Act as a customer support agent for {display_name}. RULES: 1. For location questions ONLY provide the exact address 2. NEVER include app instructions or charging steps 3. If address isn't in context, say 'I don't have that location information' 4. Use professional but friendly tone 5. Answer in 1-2 short sentences maximum",
+    "welcome_message": "Thank you for calling ParkNCharge \u00e2\u20ac\u201d your partner in smart and sustainable eMobility. How can I assist you today?",
+    "no_info_response": "I couldn't find specific information about that ParkNcharge service. Please visit our website or contact support@parkncharge.com for more details.",
+    "location_fallback": "Our charging stations are located at 3-Ecom, 4-Ecom, and 5-Ecom buildings in Pasay City",
+    "pricing_fallback": "Our standard charging rate is \u00e2\u201a\u00b128 per kWh"
+  },
+  "silanguin": {
+    "display_name": "El Paradise - Silanguin",
+    "products": [
+      "Resort"
+    ],
+    "support_email": "support@sysnetph.com",
+    "word_limit": 50,
+    "corrections": {},
+    "off_topic_response": "Sorry, your question seems unrelated to El Paradise - Silanguin and our services so I'm unable to help.",
+    "prompt_template": "CONTEXT: {context} QUESTION: {question} SHORT ANSWER:",
+    "system_message": "Act as a customer support agent for {display_name}. RULES: 1. Use professional but friendly tone 2. Answer in 1-2 short sentences maximum",
+    "welcome_message": "Welcome to El Paradise - Silanguin support. How can we help?",
+    "no_info_response": "I don't have information about that.",
+    "location_fallback": "Location information not available",
+    "pricing_fallback": "Pricing information not available"
+  }
+}

@@ -1,0 +1,45 @@
+# Core Libraries
+fastapi
+uvicorn
+python-multipart
+requests
+aiohttp
+
+# RAG Infrastructure
+ollama
+chromadb
+fastembed
+sentence-transformers
+
+# LangChain Ecosystem
+langchain
+langchain-core
+langchain-chroma
+langchain-ollama
+langchain-community
+langchain_text_splitters
+
+# Document Processing
+pdfplumber
+unstructured
+unstructured[all-docs]
+# Additional Dependencies
+pydantic  # For enhanced data validation
+python-dotenv  # For environment variables
+tiktoken  # For token counting
+nest-asyncio  # For async operations
+pygments  # For syntax highlighting in logs
+loguru  # For better logging
+
+# Optional (but recommended)
+pypdf  # Alternative PDF processor
+beautifulsoup4  # HTML parsing
+markdown  # Markdown support
+numpy  # Required by many ML libs
+torch
+transformers
+num2words
+psutil>=5.8.0
+rank_bm25
+async_lru
+pymupdf
