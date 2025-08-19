@@ -106,25 +106,24 @@ class DocumentLoader:
                 logger.warning(f"Missing required fields in {source_path}")
                 return None
                 
-            # Extract scores if they exist
-            # scores = {
-            #     'relevance_score': float(item.get('relevance_score', 0)),
-            #     'question_score': float(item.get('question_score', 0))
-            # }
-            
+            # Ensure brand is properly set and not 'None'
+            item_brand = str(item.get('brand', brand_key)).lower()
+            if item_brand in ['none', 'null', '']:
+                item_brand = brand_key
+                
             return {
-                'content': str(item.get('text', '')).strip(),
+                'content': str(item.get('text', '')),
                 'question': str(item.get('question', 'Unquestiond')),
                 'category': str(item.get('category', 'General')),
                 'source': source_path,
-                'brand': brand_key,
+                'brand': item_brand,  # Use corrected brand value
                 'metadata': {
                     **{
                         k: str(v) if not isinstance(v, (dict, list)) else json.dumps(v)
                         for k, v in item.items()
                         if k not in required_fields
                     },
-                    # **scores   Add scores to metadata
+                    'brand': item_brand  # Ensure brand is in metadata too
                 }
             }
         except Exception as e:
@@ -133,72 +132,51 @@ class DocumentLoader:
 
     @staticmethod
     def load_json_data(brand_key: Optional[str] = None) -> List[Dict]:
-        """Load and process JSON data for a brand (or all brands if None)"""
+        """Load and process JSON data with improved brand handling"""
         try:
-            # Handle None brand_key case
             if brand_key is None:
-                logger.info("Loading documents for all brands")
+                # Load all brands but preserve their original brand metadata
                 with open(Config.BRAND_DOCUMENTS_FILE, 'r', encoding='utf-8') as f:
                     brand_map = json.load(f)
                 
                 all_processed = []
-                for current_brand, doc_paths in brand_map.items():
+                for current_brand in brand_map.keys():
                     try:
                         processed = DocumentLoader.load_json_data(current_brand)
                         all_processed.extend(processed)
                     except Exception as e:
-                        logger.error(f"Failed to load documents for {current_brand}: {str(e)}")
+                        logger.error(f"Failed to load {current_brand}: {str(e)}")
                         continue
                 
-                if not all_processed:
-                    raise ValueError("No valid documents found across all brands")
                 return all_processed
             
             # Process single brand case
-            brand_key = str(brand_key).strip().lower()  # Ensure brand_key is string
-            brand_map_path = Config.BRAND_DOCUMENTS_FILE
-            logger.info(f"Loading documents for brand: {brand_key}")
-            DocumentLoader.validate_json_path(brand_map_path)
+            brand_key = str(brand_key).strip().lower()
+            DocumentLoader.validate_json_path(Config.BRAND_DOCUMENTS_FILE)
 
-            with open(brand_map_path, 'r', encoding='utf-8') as f:
+            with open(Config.BRAND_DOCUMENTS_FILE, 'r', encoding='utf-8') as f:
                 brand_map = json.load(f)
 
             doc_paths = brand_map.get(brand_key, [])
-            if not doc_paths:
-                raise ValueError(f"No documents configured for brand: {brand_key}")
-
             all_processed = []
+            
             for path_str in doc_paths:
                 path = Path(path_str)
                 try:
-                    logger.info(f"Processing document: {path}")
-                    DocumentLoader.validate_json_path(path)
-                    
                     with open(path, 'r', encoding='utf-8') as doc_file:
                         content = json.load(doc_file)
-                        if not isinstance(content, list):
-                            logger.warning(f"Expected list in {path}, got {type(content).__name__}")
-                            continue
-                            
-                        # More efficient processing - only call process_item once per item
-                        processed_items = []
-                        for item in content:
-                            processed = DocumentLoader.process_item(brand_key, str(path), item)
-                            if processed is not None:
-                                processed_items.append(processed)
                         
-                        all_processed.extend(processed_items)
+                        processed_items = [
+                            DocumentLoader.process_item(brand_key, str(path), item)
+                            for item in content if isinstance(item, dict)
+                        ]
+                        all_processed.extend([p for p in processed_items if p is not None])
                         
                 except Exception as e:
                     logger.error(f"Failed to process {path}: {str(e)}")
                     continue
 
-            if not all_processed:
-                raise ValueError(f"No valid documents found for brand {brand_key}")
-
-            logger.info(f"Loaded {len(all_processed)} valid documents for {brand_key}")
             return all_processed
-
         except Exception as e:
             logger.error(f"Document loading failed: {str(e)}")
             raise
@@ -207,7 +185,6 @@ class DocumentLoader:
     def chunk_documents(documents: List[Dict]) -> List[Document]:
         try:
             logger.info("Starting document chunking")
-            logger.info(f"[DOCUMENTS]:\n{documents}")
             if not documents:
                 logger.warning("Empty documents list received")
                 return []
@@ -221,21 +198,27 @@ class DocumentLoader:
             chroma_docs = []
             for doc_idx, doc in enumerate(documents):
                 try:
+                    # Ensure brand is properly set in metadata
                     metadata = doc.get('metadata', {})
+                    brand = str(doc.get('brand', metadata.get('brand', 'unknown')))
+                    if brand.lower() in ['none', 'null']:
+                        brand = 'unknown'
+                    
                     core_metadata = {
                         'question': str(doc.get('question', f'Document_{doc_idx}')),
                         'category': str(doc.get('category', 'General')),
                         'type': str(doc.get('type', 'faq')),
                         'source': str(doc.get('source', 'unknown')),
-                        'brand': str(doc.get('brand')),
+                        'brand': brand,  # Use corrected brand value
                     }
                     full_metadata = {**core_metadata, **metadata}
+                    
                     try:
                         filtered_metadata = filter_complex_metadata(full_metadata)
                     except Exception:
                         filtered_metadata = core_metadata
 
-                    content = str(doc.get('content', '')).strip()
+                    content = str(doc.get('content', ''))
                     if not content:
                         continue
 
@@ -262,9 +245,17 @@ class DocumentLoader:
 
     @staticmethod
     def load_and_prepare_documents(brand_key: Optional[str] = None) -> List[Document]:
+        """Load and prepare documents with proper brand metadata handling"""
         try:
             raw_docs = DocumentLoader.load_json_data(brand_key)
-            return DocumentLoader.chunk_documents(raw_docs)
+            chroma_docs = DocumentLoader.chunk_documents(raw_docs)
+            
+            # Ensure brand metadata is properly set
+            for doc in chroma_docs:
+                if 'brand' not in doc.metadata or not doc.metadata['brand']:
+                    doc.metadata['brand'] = brand_key or 'unknown'
+                    
+            return chroma_docs
         except Exception as e:
             logger.error(f"Document loading failed: {str(e)}")
             raise ValueError("No valid documents after processing")
@@ -353,12 +344,21 @@ class DocumentLoader:
 
     @classmethod
     def get_all_brands(cls) -> List[str]:
+        """Get all available brands from both document paths and metadata"""
         try:
-            logger.info("Extracting all brands from documents")
+            # Get brands from document mapping file
+            with open(Config.BRAND_DOCUMENTS_FILE, 'r', encoding='utf-8') as f:
+                brand_map = json.load(f)
+            file_brands = set(brand_map.keys())
+            
+            # Get brands from actual document metadata
             docs = cls.load_and_prepare_documents()
-            brands = sorted({doc.metadata.get("brand") for doc in docs if doc.metadata.get("brand")})
-            logger.info(f"Found brands: {brands}")
-            return brands
+            meta_brands = {doc.metadata.get("brand") for doc in docs if doc.metadata.get("brand")}
+            
+            # Combine and deduplicate
+            all_brands = sorted(file_brands.union(meta_brands))
+            logger.info(f"Found {len(all_brands)} brands: {all_brands}")
+            return all_brands
         except Exception as e:
-            logger.error(f"Failed to extract brands: {str(e)}")
+            logger.error(f"Failed to get brands: {str(e)}")
             return []

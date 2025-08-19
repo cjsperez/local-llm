@@ -74,16 +74,15 @@ def ask_ollama(text: str, model: str = "mistral:7b-instruct") -> str:
     prompt = f"""You are a strict FAQ extraction agent.
 
     **OBJECTIVE**:
-    From the given text, extract ALL possible and **distinct** question-answer pairs in strict FAQ format.
+    From the given text, generate Q&A pairs as many as possible expanding every detail into question-answer pairs in strict FAQ format.
 
     **RULES**:
-    1. Parse the text carefully and extract every standalone **fact** as a separate Q&A.
-    2. Do NOT combine unrelated facts into one entry. ONE FACT = ONE FAQ.
-    3. Ensure 100% coverage: **every important detail** from the text must be included in the output.
-    4. Each FAQ must focus on a **single detail only** (e.g., name, address, phone, pricing, services).
-    5. No vague, broad, or redundant questions.
-    6. Format the output as a valid **JSON array** only.
-    7. Each object must have exactly these keys:
+    1. Parse the text carefully and extract every **every possible atomic fact** as a separate Q&A.
+    2. Do NOT combine related/unrelated facts into one entry. ONE SUBJECT = ONE FAQ.
+    3. Ensure 100% coverage: **EVERY detail** from the text must be included in the output.
+    4. No vague, broad, or redundant questions.
+    5. Format the output as a valid **JSON array** only.
+    6. Each object must have exactly these keys:
     - `"id"`: starts at 1, increments by 1
     - `"question"`: full question, ends with "?"
     - `"text"`: complete, standalone answer (minimum 2 sentences if possible)
@@ -118,27 +117,28 @@ def ask_ollama(text: str, model: str = "mistral:7b-instruct") -> str:
   # Limit input size to prevent overload
 
     try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt.encode('utf-8'),
-            capture_output=True,
-            text=False,
-            check=True,
-            timeout=300,
-            bufsize=8192
+        response = requests.post(
+            'http://localhost:11434/api/generate',
+            json={
+                'model': model,
+                'prompt': prompt,
+                'stream': False,
+                'options': {
+                    'temperature': 0.3,
+                    'num_ctx': 4096
+                }
+            },
+            timeout=300
         )
-        raw_output = result.stdout.decode('utf-8', errors='replace')
-        raw_output = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', raw_output)
+        response.raise_for_status()
+        return response.json().get('response', '')
         
-        logger.debug(f"Raw Ollama output (first 500 chars):\n{raw_output[:500]}")
-        return raw_output
-        
-    except subprocess.TimeoutExpired:
-        logger.error("Ollama processing timeout after 300 seconds")
-        return json.dumps({"error": "Processing timeout"})
-    except Exception as e:
-        logger.error(f"Ollama processing error: {str(e)}")
-        return json.dumps({"error": f"Processing error: {str(e)}"})
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ollama API request failed: {str(e)}")
+        return json.dumps({
+            "error": "Ollama API request failed",
+            "details": str(e)
+        })
 
 def clean_llm_output(output: str) -> Union[dict, list]:
     """More robust cleaning with detailed error logging"""

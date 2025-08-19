@@ -91,7 +91,11 @@ class PersistentBM25Retriever(BM25Retriever):
         self._score_cache = {}
         all_terms = set()
         for doc in self.docs:  # Using parent class's docs field
-            all_terms.update(doc.page_content.split())
+            # Example fix for retriever.py
+            if isinstance(doc.page_content, str):
+                all_terms.update(doc.page_content.split())
+            else:
+                logger.warning(f"Skipping non-string doc: {doc.page_content}")
         
         for term in all_terms:
             self._score_cache[term] = self.bm25.get_scores([term])
@@ -153,25 +157,60 @@ class PersistentBM25Retriever(BM25Retriever):
             }, f)
         return bm25
 
-    def get_relevant_documents(self, query: str) -> List[Document]:
-        """Optimized retrieval with fallback"""
+    def get_relevant_documents(self, query: Union[str, dict]) -> List[Document]:
+        """Optimized retrieval with fallback that handles both string and dict inputs.
+        
+        Args:
+            query: Either a string query or a dictionary containing the query under 
+                'query', 'input', or 'question' keys.
+                
+        Returns:
+            List of relevant documents sorted by relevance score.
+            
+        Raises:
+            ValueError: If query extraction fails or tokenization produces no terms.
+        """
         if not self.bm25:
             return super().get_relevant_documents(query)
             
         start_time = time.time()
-        tokenized_query = query.split()
         
-        if self.precompute_scores and hasattr(self, '_score_cache'):
-            doc_scores = [0] * len(self.docs)
-            for term in tokenized_query:
-                if term in self._score_cache:
-                    scores = self._score_cache[term]
-                    for i in range(len(scores)):
-                        doc_scores[i] += scores[i]
+        # Extract query text from different input formats
+        if isinstance(query, dict):
+            query_text = (query.get("question") or 
+                        query.get("query") or 
+                        query.get("input") or 
+                        str(query))
         else:
-            doc_scores = self.bm25.get_scores(tokenized_query)
-
-        return self._get_top_docs(doc_scores, start_time)
+            query_text = str(query)
+        
+        # Validate and tokenize the query
+        if not query_text.strip():
+            raise ValueError("Empty query after extraction")
+        
+        tokenized_query = query_text.split()
+        if not tokenized_query:
+            logger.warning(f"Query tokenization failed for: {query_text}")
+            return []
+        
+        # Calculate document scores
+        try:
+            if self.precompute_scores and hasattr(self, '_score_cache'):
+                doc_scores = [0] * len(self.docs)
+                for term in tokenized_query:
+                    if term in self._score_cache:
+                        scores = self._score_cache[term]
+                        for i in range(len(scores)):
+                            doc_scores[i] += scores[i]
+            else:
+                doc_scores = self.bm25.get_scores(tokenized_query)
+                
+            return self._get_top_docs(doc_scores, start_time)
+            
+        except Exception as e:
+            logger.error(f"Scoring failed for query: {query_text}. Error: {str(e)}")
+            # Fallback to parent implementation if scoring fails
+            return super().get_relevant_documents(query_text)
 
     def _get_top_docs(self, doc_scores, start_time):
         """Extracted scoring logic"""
@@ -189,12 +228,15 @@ def create_retriever(
     bm25_weight: float = 0.6,
     vector_weight: float = 0.4,
     default_k: int = 3,
+    k: int = None,
     bm25_persist_path: str = "bm25_index.pkl",
-    enable_hybrid: bool = True
+    enable_hybrid: bool = True,
+    score_threshold: float = 0.25  # Add this new parameter with default value
 ) -> Union[EnsembleRetriever, BM25Retriever]:
     """
     Creates a hybrid retriever with comprehensive document validation and debugging.
     """
+    effective_k = k if k is not None else default_k
     def _normalize_brand(brand: Optional[str]) -> Optional[str]:
         """Normalizes brand strings for consistent comparison"""
         if not brand:
@@ -215,31 +257,80 @@ def create_retriever(
 
         # Document loading with enhanced validation
         if not hasattr(vector_db, '_cached_documents'):
-            logger.debug(f"Loading documents from vector store {brand_context}")
+            logger.info(f"Loading documents from vector store {brand_context}")
             start_load = time.time()
             
             try:
                 # First try with brand filter
                 raw_docs = vector_db._collection.get(
                     include=["documents", "metadatas"],
-                    where={"brand": brand_key} if brand_key else None
+                    # where={"brand": brand_key} if brand_key else None
                 )
-                
-                # If no results with brand filter, try without filter to debug
+
+                if raw_docs and raw_docs.get("documents"):
+                    sample_size = min(3, len(raw_docs["documents"]))
+                    logger.info(f"Document sample (first {sample_size} of {len(raw_docs['documents'])}):")
+                    
+                    for i in range(sample_size):
+                        doc_content = raw_docs["documents"][i]
+                        metadata = raw_docs["metadatas"][i] if raw_docs.get("metadatas") and i < len(raw_docs["metadatas"]) else {}
+                        
+                        logger.info(
+                            f"Document {i+1}:\n"
+                            f"Content: {doc_content[:200]}...\n"
+                            f"Metadata: {metadata}\n"
+                            f"Brand: {metadata.get('brand', 'MISSING')}\n"
+                            "-----"
+                        )
+
+                # Add safe inspection logging
+                logger.info(f"Initial raw_docs structure: {type(raw_docs)}")
+                if raw_docs:
+                    logger.info(f"raw_docs keys: {raw_docs.keys()}")
+                    if "documents" in raw_docs:
+                        doc_count = len(raw_docs["documents"])
+                        logger.info(f"Found {doc_count} documents")
+                        if doc_count > 0:
+                            logger.info(f"First document sample: {raw_docs['documents'][0][:100]}...")
+                        else:
+                            logger.info("Documents list is empty")
+                    else:
+                        logger.info("No 'documents' key found in raw_docs")
+                        
+                    if "metadatas" in raw_docs:
+                        meta_count = len(raw_docs["metadatas"]) if raw_docs["metadatas"] else 0
+                        logger.info(f"Found {meta_count} metadata entries")
+                        if meta_count > 0:
+                            logger.info(f"First metadata sample: {raw_docs['metadatas'][0]}")
+                    else:
+                        logger.info("No 'metadatas' key found in raw_docs")
+
+                # If no results with brand filter, try without filter to info
                 if brand_key and (not raw_docs or not raw_docs.get("documents")):
-                    logger.debug(f"No documents found with brand filter, trying unfiltered")
+                    logger.info(f"No documents found with brand filter, trying unfiltered")
                     raw_docs = vector_db._collection.get(
                         include=["documents", "metadatas"]
                     )
+                    
+                    # Add safe inspection logging for unfiltered results
+                    logger.info(f"Unfiltered raw_docs structure: {type(raw_docs)}")
+                    if raw_docs:
+                        logger.info(f"Unfiltered raw_docs keys: {raw_docs.keys()}")
+                        if "documents" in raw_docs:
+                            doc_count = len(raw_docs["documents"])
+                            logger.info(f"Found {doc_count} unfiltered documents")
+                            if doc_count > 0:
+                                logger.info(f"First unfiltered document: {raw_docs['documents'][0][:100]}...")
+                        if "metadatas" in raw_docs:
+                            meta_count = len(raw_docs["metadatas"]) if raw_docs["metadatas"] else 0
+                            logger.info(f"Found {meta_count} unfiltered metadata entries")
+                    
                     if raw_docs and raw_docs.get("documents"):
                         found_brands = set(m.get('brand') for m in raw_docs["metadatas"] if m)
                         logger.warning(
                             f"Found {len(raw_docs['documents'])} documents but none matched brand '{brand_key}'. "
                             f"Available brands: {found_brands}"
                         )
-                
-                if not raw_docs or not raw_docs.get("documents"):
-                    raise ValueError(f"No documents found in vector store {brand_context}")
                 
                 # Process documents with metadata validation
                 vector_db._cached_documents = []
@@ -250,6 +341,7 @@ def create_retriever(
                         continue
                         
                     metadata = meta or {}
+                    metadata.setdefault("brand", brand_key)
                     metadata.update({
                         'brand': metadata.get('brand', brand_key),
                         'doc_type': metadata.get('doc_type', 'general')
@@ -305,7 +397,7 @@ def create_retriever(
             bm25_retriever = PersistentBM25Retriever.from_documents(
                 documents=bm25_docs,
                 persist_path=bm25_persist_path,
-                k=min(len(bm25_docs), default_k),
+                k=min(len(bm25_docs), effective_k),  # Changed from default_k to effective_k
                 llm=llm,
                 precompute_scores=True
             )
@@ -322,9 +414,9 @@ def create_retriever(
         vector_retriever = vector_db.as_retriever(
             search_type="mmr",
             search_kwargs={
-                "k": default_k,
+                "k": effective_k,
                 "filter": {"brand": brand_key} if brand_key else None,
-                "score_threshold": 0.25,
+                "score_threshold": score_threshold,  # Use the parameter here
                 "fetch_k": min(50, len(vector_db._cached_documents) * 2),
                 "lambda_mult": 0.5
             }
@@ -336,7 +428,7 @@ def create_retriever(
             return EnsembleRetriever(
                 retrievers=[bm25_retriever, vector_retriever],
                 weights=[bm25_weight, vector_weight],
-                c=0.1
+                c=1
             )
         logger.warning(f"Using vector-only retriever {brand_context}")
         return vector_retriever

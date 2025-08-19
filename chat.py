@@ -1,3 +1,5 @@
+from datetime import datetime
+from itertools import chain
 import json
 import time
 import inspect
@@ -112,7 +114,15 @@ class ConversationThread:
         
         for pattern in name_patterns:
             if pattern in user_message.lower():
-                name = user_message.split(pattern)[-1].split(".")[0].strip()
+                if isinstance(user_message, str):
+                    parts = user_message.split(pattern)  # Split the string into parts
+                    if len(parts) >= 11:  # Ensure there are enough parts
+                        name = parts[-11].split(":")[0].strip()  # Take the 11th from end, then split by ":"
+                    else:
+                        name = ""  # Fallback if not enough parts exist
+                else:
+                    logger.error(f"Expected string, got {type(user_message)}: {user_message}")
+                    name = ""  # or handle the error
                 if 0 < len(name) < 50:
                     # Store as a permanent fact in the thread
                     if not hasattr(self, "user_facts"):
@@ -228,37 +238,29 @@ class QueryProcessor:
             ]
 
     def _format_input(self, inputs: Dict) -> Dict:
-        """Format inputs for the RAG chain with proper thread handling"""
+        context_str = format_context_for_prompt(inputs.get("context", []))
         input_data = {
             "question": inputs["question"],
-            "context": inputs["context"],
+            "context": context_str,  # <-- always a string
             "conversation_history": "No previous conversation",
             "user_name": "",
-            "is_first_message": True,  # Default to True, will be updated if thread exists
+            "is_first_message": True,
         }
-        # logger.info(f"[MAIN INPUT]: {inputs}\n")
-        # Only process thread if it exists in inputs
         if "thread" in inputs and inputs["thread"]:
             thread = inputs["thread"]
-            
-            # Build conversation history
             history_lines = []
-            for msg in thread.messages[-6:]:  # Last 2 exchanges
-                # logger.info(f"{msg}")
+            for msg in thread.messages[-6:]:
                 history_lines.append({
                     "role": msg.role,
                     "text": msg.content,
                     "timestamp": msg.timestamp,
                     "brand":inputs["brand"]
                 })
-            
-            # Update input data with thread information
             input_data.update({
                 "conversation_history": json.dumps(history_lines),
-                "is_first_message": len(thread.messages) <= 1,  # True only for first message
+                "is_first_message": len(thread.messages) <= 1,
                 "user_name": thread.user_facts.get("name", "") if hasattr(thread, "user_facts") else ""
             })
-            # logger.info(f"[Context]: {inputs['context']}")
             logger.info(f"[Query]: {input_data['question']}")
             logger.info(f"[Conversation history]: {input_data['conversation_history']}")
         return input_data
@@ -327,29 +329,46 @@ class QueryProcessor:
             finally:
                 self._is_warming = False
 
-    async def _initialize_vector_stores(self, brand_key: Optional[str] = None) -> bool:
-        """Initialize vector stores with retry logic"""
+    @classmethod
+    async def _initialize_vector_stores(cls, brand_key: Optional[str] = None) -> bool:
+        """Initialize vector stores with retry logic and timeout handling"""
         for attempt in range(3):
             try:
                 logger.info(f"Initializing vector stores (attempt {attempt+1}/3)")
                 if Config.RECREATE_STORE:
-                    VectorStoreManager.delete_vector_store()
+                    await cls.delete_vector_store(brand_key)
                 
-                if brand_key:
-                    VectorStoreManager.get_vector_store(
-                            brand_key=brand_key,
-                            create_if_missing=True
+                # Add timeout for store initialization
+                try:
+                    if brand_key:
+                        store = await asyncio.wait_for(
+                            VectorStoreManager.get_vector_store(
+                                brand_key=brand_key,
+                                create_if_missing=True
+                            ),
+                            timeout=20  # 20 second timeout per brand
                         )
+                        if store is None:
+                            raise RuntimeError(f"Failed to create store for {brand_key}")
+                        return True
+                        
+                    brands = DocumentLoader.load_brand_documents(brand_key)
+                    for brand in brands:
+                        logger.info(f"Initializing store for brand: {brand}")
+                        store = await asyncio.wait_for(
+                            VectorStoreManager.get_vector_store(
+                                brand_key=brand,
+                                create_if_missing=True
+                            ),
+                            timeout=20  # 20 second timeout per brand
+                        )
+                        if store is None:
+                            raise RuntimeError(f"Failed to create store for {brand}")
                     return True
+                except asyncio.TimeoutError:
+                    logger.warning(f"Vector store init timed out for {brand_key or 'all brands'}")
+                    raise
                     
-                brands = DocumentLoader.load_brand_documents(brand_key)
-                for brand in brands:
-                    logger.info(f"Brand: {brand}")
-                    VectorStoreManager.get_vector_store(
-                        brand_key=brand,
-                        create_if_missing=True
-                    )
-                return True
             except Exception as e:
                 logger.error(f"Vector store init attempt {attempt+1} failed: {str(e)}")
                 if attempt == 2:
@@ -361,7 +380,7 @@ class QueryProcessor:
         """Wait for ongoing warm-up to complete"""
         while self._is_warming:
             await asyncio.sleep(0.1)
-            logger.debug("Waiting for warm-up to complete...")
+            logger.info("Waiting for warm-up to complete...")
 
     @alru_cache(maxsize=500)
     async def process_query(
@@ -412,7 +431,7 @@ class QueryProcessor:
             # await self._ensure_initialized(brand_key=brand_key)
             
             logger.info(f"Processing query for brand {brand_key} in thread {thread_id}: '{question[:50]}...'")
-            logger.debug(f"Previous questions in thread: {previous_questions}")
+            logger.info(f"Previous questions in thread: {previous_questions}")
 
             # Step 1: Retrieve context with brand filtering
             context_docs = await self._retrieve_context(question, brand_key=brand_key)
@@ -429,6 +448,7 @@ class QueryProcessor:
                     "brand": brand_key  # Pass brand to formatter
                 }
             )
+            logger.info(f"[CHAIN]: \n\n{chain_input}")
             
             result_chunks = []
             async for chunk in self._generate_response(chain_input, stream=False, brand_key=brand_key):
@@ -511,16 +531,9 @@ class QueryProcessor:
                 }
             }
         
-    async def stream_query(
-        self, 
-        question: str, 
-        thread_id: Optional[str] = None, 
-        user_id: Optional[str] = None,
-        brand_key: Optional[str] = None,
-        reset: bool = False
-    ):
-        """Stream query response chunks with brand-specific context and full feature parity with process_query"""
-        last_yield_time = time.time()
+    async def stream_query(self, question: str, thread_id: Optional[str] = None, 
+        user_id: Optional[str] = None, brand_key: Optional[str] = None,
+        reset: bool = False):
         start_time = time.perf_counter()
         response_metadata = {
             "status": "in_progress",
@@ -531,7 +544,6 @@ class QueryProcessor:
             "documents_retrieved": 0,
             "model": Config.LLM_MODEL
         }
-
         try:
             # Handle thread reset if requested
             if reset:
@@ -564,7 +576,7 @@ class QueryProcessor:
             await self._ensure_initialized(brand_key)
             
             logger.info(f"Streaming query for brand {brand_key} in thread {thread_id}: '{question[:50]}...'")
-            logger.debug(f"Previous questions in thread: {previous_questions}")
+            logger.info(f"Previous questions in thread: {previous_questions}")
 
             # Step 1: Retrieve context with brand filtering
             context_docs = await self._retrieve_context(question, brand_key=brand_key)
@@ -581,32 +593,34 @@ class QueryProcessor:
                 "question": question,
                 "context": context_docs,
                 "thread": thread,
-                "brand": brand_key  # Pass brand to formatter
+                "brand": brand_key
             })
 
-            # Collect all response chunks for post-processing
+            logger.info(f"[CHAIN]: \n\n{chain_input}")
+
             full_response_chunks = []
-            
+
             # Stream response chunks
             async for chunk in self._generate_response(chain_input, stream=True, brand_key=brand_key):
-                if hasattr(chunk, 'content'):
-                    chunk_content = chunk.content
+                if isinstance(chunk, dict) and "error" in chunk:
+                    response_metadata.update({
+                        "status": "error",
+                        "error": chunk["error"],
+                        "processing_time": time.perf_counter() - start_time
+                    })
+                    yield {"status": "error", "error": chunk["error"]}
+                    break
                 else:
-                    chunk_content = str(chunk)
-                
-                
-                
-                # Send each chunk to client with metadata
-                chunk_data = {
-                    "text": chunk_content,
-                    "metadata": response_metadata
-                }
-                yield f"data: {json.dumps(chunk_data)}"
-                full_response_chunks.append(chunk_content)
+                    text_part = chunk if isinstance(chunk, str) else chunk.get("text", str(chunk))
+                    full_response_chunks.append(text_part)  # ✅ store for later
+                    yield {
+                        "text": text_part,
+                        "metadata": response_metadata
+                    }
 
-            # Combine all chunks into full response
-            assistant_response = "".join(full_response_chunks).strip()
+            assistant_response = "".join(full_response_chunks)
             generation_time = time.perf_counter() - start_time - retrieval_time
+
             
             # Update final metadata
             response_metadata.update({
@@ -614,6 +628,7 @@ class QueryProcessor:
                 "processing_time": time.perf_counter() - start_time,
                 "generation_time": generation_time
             })
+            yield f"{json.dumps(response_metadata)}\n\n"
 
             # Apply brand-specific post-processing
             if assistant_response and brand_key:
@@ -658,7 +673,7 @@ class QueryProcessor:
             )
             
             # Final completion message with full metadata
-            yield f"data: {json.dumps({'status': 'complete', 'metadata': response_metadata})}"
+            # yield f"{json.dumps({'status': 'complete', 'metadata': response_metadata})}"
 
         except Exception as e:
             error_type = type(e).__name__
@@ -677,7 +692,7 @@ class QueryProcessor:
                     "brand_config": f"Check with: GET /brands/{brand_key}" if brand_key else "No brand specified"
                 }
             }
-            yield f"data: {json.dumps(error_metadata)}"
+            yield f"{json.dumps(error_metadata)}\n\n"
 
     async def _retrieve_context(self, question: str, brand_key: Optional[str] = None) -> List[Dict]:
         """Retrieve and rank relevant documents based on the question.
@@ -696,10 +711,10 @@ class QueryProcessor:
         logger.info(f"Starting context retrieval for question: '{question}'")
         
         try:
-            # Validate retriever initialization
-            if not hasattr(rag_system, 'retriever') or not rag_system.retriever:
-                logger.error("Retriever not initialized in RAG system")
-                raise RuntimeError("Retriever not initialized")
+            # Get the retriever for this brand
+            retriever = rag_system.get_retriever(brand_key)
+            if not retriever:
+                raise RuntimeError(f"No retriever available for brand {brand_key}")
             
             # Prepare retrieval config
             retrieval_config = {}
@@ -708,8 +723,14 @@ class QueryProcessor:
                 logger.info(f"Filtering for brand: {brand_key}, collection: {collection_name}")
                 retrieval_config = {"configurable": {"collection_name": collection_name}}
             
+            # Execute retrieval
+            if hasattr(retriever, 'ainvoke'):
+                result = await retriever.ainvoke(question, config=retrieval_config)
+            else:
+                result = retriever.invoke(question, config=retrieval_config)
+            
             # Execute retrieval (async if available)
-            retriever = rag_system.retriever
+            retriever = rag_system.get_retriever(brand_key)
             invoke_method = retriever.ainvoke if hasattr(retriever, 'ainvoke') else retriever.invoke
             if inspect.iscoroutinefunction(invoke_method):
                 result = await invoke_method(question, config=retrieval_config)
@@ -759,7 +780,15 @@ class QueryProcessor:
             
             # Sort by score (descending) and limit to top 5
             scored_docs.sort(key=lambda x: -x['score'])
-            top_docs = scored_docs[:5]
+
+            unique_docs = {}
+            for doc in scored_docs:
+                content_hash = hash(doc['content'])
+                if content_hash not in unique_docs:
+                    unique_docs[content_hash] = doc
+            
+            # Sort by score (descending) and limit to top 5 unique docs
+            top_docs = sorted(unique_docs.values(), key=lambda x: -x['score'])[:5]
             # logger.info(
             #     f"[TOP 5 RESULT]: {top_docs}"
             # )
@@ -794,137 +823,199 @@ class QueryProcessor:
             raise RuntimeError(f"Context retrieval failed: {str(e)}")
 
 
-    async def _generate_response(
-        self, 
-        chain_input: Dict, 
-        stream: bool = False, 
-        brand_key: Optional[str] = None,
-        max_retries: int = 2,
-        timeout: int = 120
-    ) -> AsyncGenerator[Union[str, Dict], None]:
-        """
-        Generate response with enhanced error handling, brand-specific processing, and reliability features
-        
-        Args:
-            chain_input: Dictionary containing input parameters for the generation
-            stream: Whether to stream the response or return it complete
-            brand_key: Optional brand identifier for brand-specific processing
-            max_retries: Maximum number of retry attempts for generation
-            timeout: Timeout in seconds for the generation operation
+    async def _generate_response(self, chain_input: Dict, stream: bool = False, 
+    brand_key: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
+        chain = rag_system.get_chain(brand_key)
+        if not chain:
+            raise RuntimeError(f"No chain available for brand {brand_key}")
+
+        if stream:
+            # Initial metadata message
+            # yield {
+            #     "status": "started",
+            #     "timestamp": datetime.now().isoformat(),
+            #     "thread_id": chain_input.get("thread_id"),
+            #     "brand": brand_key
+            # }
             
-        Yields:
-            Response chunks (when streaming) or complete response (when not streaming)
-        """
-        start_time = time.perf_counter()
-        fallback_response = self._get_brand_fallback(brand_key)
-        attempt = 0
-        
+            # Stream response word by word
+            buffer = ""
+            async for token in chain.astream(chain_input):
+                if isinstance(token, dict) and "error" in token:
+                    yield token
+                    break
+
+                content = str(token)
+                buffer += content
+
+                # Split buffer into tokens that preserve spaces
+                while True:
+                    match = re.match(r'(\s*\S+)', buffer)
+                    if not match:
+                        break
+                    token_with_space = match.group(1)
+                    buffer = buffer[len(token_with_space):]
+                    yield {
+                        "text": token_with_space,
+                        "status": "in_progress",
+                        "timestamp": datetime.now().isoformat()
+                    }
+
+            # Yield any remaining content
+            if buffer:
+                yield {
+                    "text": buffer,
+                    "status": "in_progress",
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            # Final completion message
+            # yield {
+            #     "status": "complete",
+            #     "timestamp": datetime.now().isoformat()
+            # }
+        else:
+            result = await chain.ainvoke(chain_input)
+            yield self._extract_response_content(result)
+
+    def _process_chunk(self, chunk: Any) -> Optional[Dict]:
+        """Process a single chunk from the LLM stream with robust type handling"""
         try:
-            # Validate chain input
-            if not chain_input or "question" not in chain_input:
-                raise ValueError("Invalid chain input - missing required 'question' field")
-                
-            if not chain_input.get("context"):
-                logger.warning("No context provided for generation - response may be less accurate")
+            content = None
 
-            # Get brand-specific configuration
-            brand_config = get_brand_config(brand_key) if brand_key else None
+            # Handle dictionary responses first
+            if isinstance(chunk, dict):
+                # If it's an error response, return it as-is
+                if 'error' in chunk:
+                    return chunk
+                # Try common response keys
+                for key in ['content', 'text', 'result', 'response', 'message', 'output']:
+                    if key in chunk:
+                        content = chunk[key]
+                        break
+                # If no recognized keys, convert the whole dict to string
+                if content is None:
+                    content = str(chunk)
+            # Handle LangChain's AIMessage chunk format
+            elif hasattr(chunk, 'content'):
+                content = chunk.content
+            # Handle string responses
+            elif isinstance(chunk, str):
+                content = chunk
+            # Handle all other types by converting to string
+            else:
+                content = str(chunk)
 
-            while attempt <= max_retries:
-                logger.info(f"[CHAIN INPUT]: {chain_input}")
-                if "context" in chain_input:
-                    # Ensure scores are properly transferred from doc level to metadata
-                    fixed_context = []
-                    for doc in chain_input["context"]:
-                        if isinstance(doc, dict):
-                            # Create a copy to avoid modifying original
-                            fixed_doc = doc.copy()
-                            metadata = fixed_doc.get('metadata', {}).copy()
-                            
-                            # Transfer scores from doc level to metadata if they exist
-                            # if 'relevance_score' in fixed_doc:
-                            #     metadata['relevance_score'] = float(fixed_doc['relevance_score'])
-                            # if 'question_score' in fixed_doc:
-                            #     metadata['question_score'] = float(fixed_doc['question_score'])
-                            
-                            fixed_doc['metadata'] = metadata
-                            fixed_context.append(fixed_doc)
-                        else:
-                            fixed_context.append(doc)
+            # Clean and validate the content
+            if content is not None:
+                if isinstance(content, str):
+                    content = content
+                    if content:
+                        return {
+                            "content": content,
+                            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                else:
+                    return {
+                        "content": str(content),
+                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+            return None
+
+        except Exception as e:
+            logger.error(f"Error processing chunk: {str(e)}")
+            return {
+                "error": str(e),
+                "status": "chunk_error"
+            }
                     
-                    chain_input["context"] = fixed_context
-                
-                # logger.info(f"Fixed context metadata: {[doc.get('metadata', {}) for doc in chain_input.get('context', [])]}")
+        # except Exception as e:
+        #     logger.error(f"Final generation failure after {attempt} attempts: {str(e)}")
+        #     error_info = {
+        #         "error": str(e),
+        #         "attempts": attempt,
+        #         "brand": brand_key,
+        #         "fallback_used": True
+        #     }
+            
+        #     # Enhanced fallback with error context
+        #     enhanced_fallback = f"{fallback_response}\n\n[Error: {str(e)}]" if self._include_errors_in_response else fallback_response
+        #     yield enhanced_fallback
+            
+        # finally:
+        #     processing_time = time.perf_counter() - start_time
+        #     logger.info(f"Generation completed in {processing_time:.2f} seconds after {attempt} attempts")
+            
+        #     # Log performance metrics
+        #     self._log_generation_metrics({
+        #         "success": attempt <= max_retries,
+        #         "processing_time": processing_time,
+        #         "attempts": attempt,
+        #         "brand": brand_key,
+        #         "streaming": stream,
+        #         "input_length": len(chain_input.get("question", "")),
+        #         "context_items": len(chain_input.get("context", []))
+        #     })
+
+    async def _process_streaming_chunks(self, stream: AsyncGenerator) -> AsyncGenerator[Dict, None]:
+        """Process streaming chunks with proper error handling"""
+        try:
+            async for chunk in stream:
+                logger.info(f"[CHECKING]: {chunk}")
                 try:
-                    if stream:
-                        # Streaming response with timeout and retry support
-                        async for chunk in self._stream_with_timeout(
-                            self._stream_response(chain_input, brand_key),
-                            timeout=timeout
-                        ):
-                            logger.info(f"=> text: {chunk}" )
-                            yield chunk
-                        break  # Success - exit retry loop
+                    # Extract content from different chunk formats
+                    if isinstance(chunk, str):
+                        content = chunk
+                    elif hasattr(chunk, 'content'):
+                        content = chunk.content
+                    elif isinstance(chunk, dict):
+                        if 'content' in chunk:
+                            content = chunk['content']
+                        elif 'text' in chunk:
+                            content = chunk['text']
+                        elif 'response' in chunk:
+                            content = chunk['response']
+                        else:
+                            content = str(chunk)
                     else:
-                        logger.info(f"\n\nhere?\n\n")
-                        # Non-streaming response with timeout
-                        # try:
-                        #     result = await asyncio.wait_for(
-                        #         self._generate_complete_response(chain_input, brand_config, llm_params),
-                        #         timeout=timeout
-                        #     )
-                            
-                        #     # Validate and process response
-                        #     processed = self._process_response(result, brand_key)
-                            
-                        #     # Apply brand-specific formatting if needed
-                        #     if brand_config and brand_config.get("response_format"):
-                        #         processed = self._apply_response_format(processed, brand_config)
-                            
-                        #     yield processed
-                        #     break  # Success - exit retry loop
-                            
-                        # except asyncio.TimeoutError:
-                        #     logger.warning(f"Generation timeout after {timeout}s (attempt {attempt + 1})")
-                        #     attempt += 1
-                        #     if attempt > max_retries:
-                        #         raise RuntimeError("Max retries exceeded due to timeout")
-                        #     continue
-                            
-                except Exception as e:
-                    logger.error(f"Generation attempt {attempt + 1} failed: {str(e)}")
-                    attempt += 1
-                    if attempt > max_retries:
-                        raise  # Re-raise if we've exhausted retries
-                    await asyncio.sleep(1 * attempt)  # Exponential backoff
+                        content = str(chunk)
+                    
+                    # Yield properly formatted chunk
+                    if content.strip():
+                        yield {
+                            "content": content,
+                            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        
+                except Exception as chunk_error:
+                    logger.warning(f"Chunk processing error: {chunk_error}")
+                    yield {
+                        "error": str(chunk_error),
+                        "status": "chunk_error"
+                    }
                     
         except Exception as e:
-            logger.error(f"Final generation failure after {attempt} attempts: {str(e)}")
-            error_info = {
+            logger.error(f"Streaming error: {str(e)}")
+            yield {
                 "error": str(e),
-                "attempts": attempt,
-                "brand": brand_key,
-                "fallback_used": True
+                "status": "stream_error"
             }
-            
-            # Enhanced fallback with error context
-            enhanced_fallback = f"{fallback_response}\n\n[Error: {str(e)}]" if self._include_errors_in_response else fallback_response
-            yield enhanced_fallback
-            
-        finally:
-            processing_time = time.perf_counter() - start_time
-            logger.info(f"Generation completed in {processing_time:.2f} seconds after {attempt} attempts")
-            
-            # Log performance metrics
-            self._log_generation_metrics({
-                "success": attempt <= max_retries,
-                "processing_time": processing_time,
-                "attempts": attempt,
-                "brand": brand_key,
-                "streaming": stream,
-                "input_length": len(chain_input.get("question", "")),
-                "context_items": len(chain_input.get("context", []))
-            })
+            raise
+
+    def _extract_response_content(self, result: Any) -> str:
+        """Extract content from various response formats"""
+        if isinstance(result, str):
+            return result
+        if hasattr(result, 'content'):
+            return result.content
+        if isinstance(result, dict):
+            if 'result' in result:
+                return result['result']
+            if 'text' in result:
+                return result['text']
+            if 'output' in result:
+                return result['output']
+        return str(result)
 
     async def _stream_with_timeout(
         self,
@@ -960,31 +1051,145 @@ class QueryProcessor:
             f"context_items={metrics['context_items']}"
         )
 
-    async def _stream_response(self, chain_input: Dict, brand_key: Optional[str] = None):
-        buffer = ""
+    @staticmethod
+    async def debug_astream(chain, formatted_input):
         try:
-            async for chunk in rag_system.chain.astream(chain_input):
-                try:
-                    content = str(chunk)
-                    # buffer += content
-                    content = str(chunk)
-                    if content.strip():
-                        yield content
-                            
-                except Exception as chunk_error:
-                    logger.warning(f"Chunk processing error: {chunk_error}")
-                    yield f"[ERROR: {str(chunk_error)}]"
-                    continue
+            logger.debug(f"[DEBUG ASTREAM CALL] Chain type: {type(chain)}, Input keys: {list(formatted_input.keys())}")
             
-            if buffer:
-                yield buffer
-                logger.info(f"Completed streaming. Buffer length: {len(buffer)}")
+            idx = 0
+            async for chunk in chain.astream(formatted_input):
+                logger.info(f"[DEBUG CHUNK #{idx}] TYPE: {type(chunk)} | RAW VALUE: {repr(chunk)[:200]}")
+                yield chunk
+                idx += 1
 
         except Exception as e:
-            logger.error(f"Streaming error: {str(e)}")
-            yield f"data: {{\"error\": \"Streaming failed\", \"message\": \"{str(e)}\"}}\n\n"
-            yield "data: {\"status\": \"error\"}\n\n"
-            raise RuntimeError("Response generation aborted") from e
+            logger.exception("[DEBUG astream ERROR]", exc_info=True)
+            raise
+
+    async def _stream_response(self, chain_input: Dict, brand_key: str) -> AsyncGenerator[str, None]:
+        """Enhanced streaming response with proper chunk handling"""
+        try:
+            # Initialize chain and validate input
+            chain = rag_system.get_chain(brand_key)
+            if not chain:
+                raise ValueError(f"No chain available for brand {brand_key}")
+
+            # Prepare formatted input with proper string conversion
+            formatted_input = {
+                "question": str(chain_input["question"]),
+                "context": self._format_context(chain_input.get("context")),
+                "conversation_history": self._format_history(chain_input.get("conversation_history")),
+                "is_first_message": chain_input.get("is_first_message", True)
+            }
+            
+            logger.debug(f"Streaming input prepared: {self._truncate_json(formatted_input)}")
+
+            # Stream chunks with proper error handling
+            async for chunk in self._process_chunks(chain, formatted_input):
+                yield chunk
+
+        except Exception as e:
+            logger.error(f"Streaming failed: {str(e)}", exc_info=True)
+            yield self._format_sse_message({
+                'error': 'Stream processing failed',
+                'message': str(e),
+                'status': 'error'
+            })
+
+    def _format_context(self, context) -> str:
+        """Format context for LLM prompt"""
+        if isinstance(context, str):
+            return context
+        if isinstance(context, (list, dict)):
+            return self.format_docs(context)  # Your existing document formatter
+        return str(context)
+    
+    def format_docs(docs):
+        """Format documents for context injection with robust error handling"""
+        if not docs:
+            return "No relevant documents available"
+        
+        # Ensure docs is a list
+        if not isinstance(docs, (list, tuple)):
+            docs = [docs]
+        
+        formatted = []
+        for doc in docs[:3]:  # Only use top 3 most relevant docs
+            try:
+                # Handle Document objects and dicts
+                if hasattr(doc, 'page_content'):
+                    content = doc.page_content
+                    metadata = getattr(doc, 'metadata', {})
+                elif isinstance(doc, dict):
+                    # Defensive extraction
+                    content = doc.get('content', '')
+                    metadata = doc.get('metadata', {})
+                    # If content is still a dict, convert to string
+                    if isinstance(content, dict):
+                        content = str(content)
+                else:
+                    content = str(doc)
+                    metadata = {}
+                
+                # Ensure content is a string
+                if not isinstance(content, str):
+                    content = str(content)
+                
+                # Clean and format the content
+                if content:
+                    content = re.sub(r'\b(doc(ument)?\s*\d+)\b', '', content, flags=re.IGNORECASE).strip()
+                    source = metadata.get('source', '')
+                    if source:
+                        content = f"{content}\n(Source: {Path(source).name})"
+                    formatted.append(content)
+            except Exception as e:
+                logger.error(f"Error formatting document: {str(e)}")
+                continue
+        
+        # Always return a string
+        return "\n\n".join(formatted) if formatted else "No valid document content found"
+
+    def _format_history(self, history) -> str:
+        """Format conversation history"""
+        if isinstance(history, str):
+            return history
+        return json.dumps(history) if history else "[]"
+
+    async def _process_chunks(self, chain, formatted_input) -> AsyncGenerator[dict, None]:
+        """Process and validate streaming chunks"""
+        async for chunk in QueryProcessor.debug_astream(chain, formatted_input):
+            try:
+                processed = self._process_single_chunk(chunk)
+                if processed:
+                    yield {'text': processed}  # Yield dict, not SSE string
+            except Exception as e:
+                logger.warning(f"Chunk processing error: {str(e)}")
+                continue
+
+    def _process_single_chunk(self, chunk) -> Optional[str]:
+        """Extract content from various chunk formats"""
+        if chunk is None:
+            return None
+            
+        if isinstance(chunk, str):
+            return chunk
+        if isinstance(chunk, bytes):
+            return chunk.decode()
+        if hasattr(chunk, 'content'):
+            return str(chunk.content)
+        if isinstance(chunk, dict):
+            return chunk.get('text', chunk.get('content', str(chunk)))  # Prefer 'text' over 'content'
+        return str(chunk)
+
+    def _truncate_json(self, data: Dict, length: int = 500) -> str:
+        """Helper for safe logging of large objects"""
+        s = json.dumps(data, ensure_ascii=False)
+        return s[:length] + ('...' if len(s) > length else '')
+
+    def _format_sse_message(self, data: Dict) -> str:
+        """Properly format Server-Sent Events messages"""
+        return f"{json.dumps(data, ensure_ascii=False)}\n\n"
+
         
     async def _generate_complete_response(
         self,
@@ -1016,7 +1221,7 @@ class QueryProcessor:
                 chain_input,
                 config={"configurable": {"llm_params": llm_params}}
             )
-            logger.debug(f"Raw LLM response: {result[:500]}...")  # Log first 500 chars
+            logger.info(f"Raw LLM response: {result[:500]}...")  # Log first 500 chars
             
             # Extract content from different response formats
             content = self._extract_response_content(result)
@@ -1211,7 +1416,6 @@ async def health_check():
         # Check LLM model
         if checks["ollama_connection"] and checks["models_available"]:
             try:
-                from langchain_ollama import ChatOllama
                 llm = ChatOllama(
                     model=Config.LLM_MODEL,
                     base_url=Config.OLLAMA_BASE_URL,
@@ -1363,3 +1567,26 @@ def process_query_sync(question: str, thread_id: Optional[str] = None, user_id: 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     return loop.run_until_complete(process_query_async(question, thread_id, user_id))
+
+def format_context_for_prompt(context: Union[str, List, Dict]) -> str:
+    """Convert context to a readable string format for the prompt."""
+    if isinstance(context, str):
+        return context
+        
+    if isinstance(context, list):
+        formatted = []
+        for doc in context:
+            if isinstance(doc, str):
+                formatted.append(doc)
+            elif isinstance(doc, dict):
+                content = doc.get('content', '')
+                metadata = doc.get('metadata', {})
+                source = metadata.get('source', '')
+                if content:
+                    formatted.append(f"{content}\nSource: {source}")
+        return "\n\n".join(formatted)
+        
+    if isinstance(context, dict):
+        return json.dumps(context)
+        
+    return str(context)

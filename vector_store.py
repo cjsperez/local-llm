@@ -23,9 +23,16 @@ import concurrent.futures
 import json
 import getpass
 import sqlite3
-import fcntl  # For Unix file locking
+# import fcntl  # For Unix file locking
 
 logger = logging.getLogger(__name__)
+
+class QueryAwareEmbeddings(CacheBackedEmbeddings):
+    def embed_query(self, text):
+        """Handle both string and dict inputs for embeddings"""
+        if isinstance(text, dict):
+            text = text.get("question") or text.get("query") or str(text)
+        return super().embed_query(text)
 
 class SanitizedFileStore(LocalFileStore):
     """Custom file store with sanitized keys"""
@@ -34,13 +41,14 @@ class SanitizedFileStore(LocalFileStore):
         return super()._get_full_path(safe_key)
 
 def get_cached_embeddings():
-    """Create cached embeddings with sanitized keys"""
+    """Create cached embeddings with input handling"""
     embedding_cache = SanitizedFileStore(str(Config.EMBEDDING_CACHE_PATH))
-    return CacheBackedEmbeddings.from_bytes_store(
-        OllamaEmbeddings(
-            model=Config.EMBEDDING_MODEL,
-            base_url=Config.OLLAMA_BASE_URL
-        ),
+    base_embeddings = OllamaEmbeddings(
+        model=Config.EMBEDDING_MODEL,
+        base_url=Config.OLLAMA_BASE_URL
+    )
+    return QueryAwareEmbeddings.from_bytes_store(
+        base_embeddings,
         embedding_cache,
         namespace=Config.sanitize_name(Config.EMBEDDING_MODEL)
     )
@@ -48,29 +56,29 @@ def get_cached_embeddings():
 cached_embeddings = get_cached_embeddings()
 
 def validate_documents(documents: List) -> List[Document]:
-    """Ensure documents are properly formatted with comprehensive checks"""
-    if not documents:
-        raise ValueError("No documents provided for vector store")
-
     validated = []
+    errors = []
+    
     for i, doc in enumerate(documents):
-        if not isinstance(doc, Document):
-            logger.error(f"[validate_documents] Skipping invalid doc at index {i}: {type(doc)} - {repr(doc)}")
-            continue
-
         try:
+            if not isinstance(doc, Document):
+                raise ValueError(f"Not a Document at index {i}")
+                
             if not doc.page_content or not str(doc.page_content).strip():
-                logger.warning(f"Found empty document at index {i}: {doc.metadata.get('title', 'Untitled')}")
-                continue
-
-            validated.append(Document(
-                page_content=doc.page_content,
-                metadata=doc.metadata
-            ))
+                raise ValueError(f"Empty content at index {i}")
+                
+            if not doc.metadata.get('brand'):
+                raise ValueError(f"Missing brand metadata at index {i}")
+                
+            validated.append(doc)
         except Exception as e:
-            logger.error(f"[validate_documents] Failed to validate doc at index {i}: {e}")
-            continue
-
+            errors.append(str(e))
+    
+    if errors:
+        logger.error(f"Document validation errors:\n" + "\n".join(errors))
+        if not validated:
+            raise ValueError("No valid documents after validation")
+    
     return validated
 
 @dataclass
@@ -268,20 +276,13 @@ class VectorStoreManager:
     @classmethod
     def _ensure_writable_directory(cls, path: Path) -> bool:
         """Ensure directory is writable"""
-        for attempt in range(3):
-            try:
-                path.mkdir(parents=True, exist_ok=True)
-                os.chmod(path, 0o777)
-                for root, dirs, files in os.walk(path):
-                    for d in dirs:
-                        os.chmod(os.path.join(root, d), 0o777)
-                    for f in files:
-                        os.chmod(os.path.join(root, f), 0o666)
-                return True
-            except Exception as e:
-                logger.error(f"Directory permission setting failed (attempt {attempt+1}): {e}")
-                time.sleep(1)
-        return False
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            os.chmod(path, 0o777)  # Make directory fully writable
+            return True
+        except Exception as e:
+            logger.error(f"Permission error: {str(e)}")
+            return False
 
     @classmethod
     def _ensure_file_ownership(cls, path: Path):
@@ -502,16 +503,18 @@ class VectorStoreManager:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def create_vector_store(cls, documents: List[Document], brand_key: str, recreate: bool = False) -> Chroma:
         """Create or recreate vector store"""
+        mem_before = psutil.virtual_memory()
+        logger.info(f"Memory before: {mem_before.percent}% used")
+        logger.info(f"Starting vector store creation for {brand_key}")
         async with cls._lock:
             try:
-                if recreate:
-                    if not await cls.rebuild_vector_store(brand_key, documents):
-                        raise RuntimeError(f"Failed to rebuild store for {brand_key}")
-                    return cls._stores[brand_key]
-                
                 config = cls._get_store_config(brand_key)
-                processed_docs = cls._prepare_documents(documents, brand_key)
-                validated_docs = validate_documents(processed_docs)
+                logger.info(f"Store config: {config}")
+                
+                # Add document validation logging
+                logger.info(f"Validating {len(documents)} documents")
+                validated_docs = validate_documents(documents)
+                logger.info(f"After validation: {len(validated_docs)} documents")
                 
                 store = Chroma.from_documents(
                     documents=validated_docs,
@@ -519,65 +522,69 @@ class VectorStoreManager:
                     persist_directory=str(config.persist_path),
                     collection_name=config.collection_name
                 )
-                cls._stores[brand_key] = store
+                logger.info("Vector store created successfully")
                 return store
-
             except Exception as e:
-                logger.error(f"Store creation failed for {brand_key}: {type(e).__name__} - {str(e)}")
-                if config.persist_path.exists():
-                    shutil.rmtree(config.persist_path, ignore_errors=True)
+                logger.error(f"Store creation failed: {type(e).__name__} - {str(e)}", exc_info=True)
                 raise
+            finally:
+                mem_after = psutil.virtual_memory()
+                logger.info(f"Memory after: {mem_after.percent}% used")
+                logger.info(f"Memory delta: {mem_after.used - mem_before.used} bytes")
 
     @classmethod
     async def get_vector_store(cls, brand_key: str, create_if_missing: bool = False, 
                             documents: Optional[List[Document]] = None) -> Optional[Chroma]:
         """Get initialized store instance for specific brand"""
         async with cls._lock:
-            if brand_key in cls._stores:
-                store = cls._stores[brand_key]
-                if hasattr(store, '_collection') and brand_key not in store._collection.name:
-                    logger.warning(f"Store collection name mismatch for {brand_key}")
-                    del cls._stores[brand_key]
-                    return await cls.get_vector_store(brand_key, create_if_missing, documents)
-                return store
-                
-            config = cls._get_store_config(brand_key)
-            
             try:
-                store = Chroma(
-                    persist_directory=str(config.persist_path),
-                    embedding_function=config.embedding_function,
-                    collection_name=config.collection_name,
-                    collection_metadata={"brand": brand_key}
-                )
-                
-                if hasattr(store, '_collection'):
-                    if store._collection.count() > 0:
-                        collection_brand = store._collection.metadata.get('brand')
-                        if collection_brand != brand_key:
-                            logger.error(f"Collection brand mismatch: expected {brand_key}, got {collection_brand}")
-                            if create_if_missing:
-                                logger.info(f"Recreating store for {brand_key}")
-                                await cls.delete_vector_store(brand_key)
-                                return await cls.get_vector_store(brand_key, True, documents)
-                            return None
-                        
-                        cls._stores[brand_key] = store
-                        logger.info(f"Loaded store for {brand_key} with {store._collection.count()} docs")
+                # Return cached store if available and valid
+                if brand_key in cls._stores:
+                    store = cls._stores[brand_key]
+                    if hasattr(store, '_collection') and store._collection is not None:
                         return store
-                        
+                    del cls._stores[brand_key]  # Remove invalid store from cache
+
+                config = cls._get_store_config(brand_key)
+                
+                # First try to load existing store
+                try:
+                    store = Chroma(
+                        persist_directory=str(config.persist_path),
+                        embedding_function=config.embedding_function,
+                        collection_name=config.collection_name
+                    )
+                    
+                    # Validate the loaded store
+                    if hasattr(store, '_collection') and store._collection is not None:
+                        cls._stores[brand_key] = store
+                        logger.info(f"Loaded existing store for {brand_key}")
+                        return store
+                except Exception as load_error:
+                    logger.warning(f"Error loading existing store: {str(load_error)}")
+
+                # If we get here, either store doesn't exist or is invalid
                 if create_if_missing:
-                    if documents:
-                        return await cls.create_vector_store(documents, brand_key)
-                    else:
+                    if documents is None:
                         from data_loader import DocumentLoader
-                        docs = await asyncio.to_thread(DocumentLoader.load_brand_documents, brand_key)
-                        return await cls.create_vector_store(docs, brand_key)
-                        
+                        documents = await asyncio.to_thread(
+                            DocumentLoader.load_brand_documents, 
+                            brand_key=brand_key
+                        )
+                        if not documents:
+                            logger.error(f"No documents found for brand {brand_key}")
+                            return None
+
+                    logger.info(f"Creating new store for {brand_key}")
+                    store = await cls.create_vector_store(documents, brand_key)
+                    if store is not None:
+                        cls._stores[brand_key] = store
+                    return store
+
                 return None
                 
             except Exception as e:
-                logger.error(f"Failed to load store for {brand_key}: {str(e)}")
+                logger.error(f"Failed to load store for {brand_key}: {str(e)}", exc_info=True)
                 if await cls.repair_database(brand_key):
                     return await cls.get_vector_store(brand_key, create_if_missing, documents)
                 return None

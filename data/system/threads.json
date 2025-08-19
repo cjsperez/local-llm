@@ -6292,5 +6292,53 @@
         "brand": null
       }
     ]
+  },
+  "d8713444-f4dd-4d97-9125-6ee9089a8110": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "968ca225-34e6-42c5-935e-5d8ed9f1449b",
+        "content": "What is the cost of ParkNcharge's Model A EV Charger?",
+        "role": "user",
+        "timestamp": "2025-08-08 11:21:31",
+        "brand": null
+      }
+    ]
+  },
+  "ba604eff-3f0e-4eca-bfab-2ed2cd6471e7": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "d7946b8a-e5a2-47d8-adb4-0042e3a2541d",
+        "content": "What is the cost of ParkNcharge's Model A EV Charger?",
+        "role": "user",
+        "timestamp": "2025-08-08 13:13:35",
+        "brand": null
+      }
+    ]
+  },
+  "698b6d6d-57dc-47a1-9d8c-4017424a0ded": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "5d73b769-8711-436c-b254-464e15e8a2d0",
+        "content": "What is the cost of ParkNcharge's Model A EV Charger?",
+        "role": "user",
+        "timestamp": "2025-08-11 08:26:06",
+        "brand": null
+      }
+    ]
+  },
+  "ae503c84-7e18-4a32-a20c-54e3987fd82c": {
+    "user_id": null,
+    "messages": [
+      {
+        "id": "3724d996-65e9-4f14-ac36-d45199319c59",
+        "content": "What is the cost of ParkNcharge's Model A EV Charger?",
+        "role": "user",
+        "timestamp": "2025-08-11 08:32:05",
+        "brand": null
+      }
+    ]
   }
 }

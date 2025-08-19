@@ -40,3 +40,6 @@ torch
 transformers
 num2words
 psutil>=5.8.0
+rank_bm25
+async_lru
+pymupdf

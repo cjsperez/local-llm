@@ -169,4 +169,4 @@ python ./utils/doc_extractor.py --url "https://www.parkncharge.ph" --output ./sa
 
 ## 📎 Credits
 
-Built with ❤️ by Crisjahn Perez
+Built by Crisjahn Perez

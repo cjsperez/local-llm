@@ -24,7 +24,7 @@ def validate_response(
     if brand_config:
         # Word limit check
         word_limit = brand_config.get("word_limit", 50)
-        if len(response.split()) > word_limit:
+        if isinstance(response, str) and len(response.split()) > word_limit:
             return False, f"Response exceeds {word_limit}-word limit"
 
         # Off-topic content check

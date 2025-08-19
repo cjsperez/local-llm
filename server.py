@@ -542,7 +542,8 @@ async def upload_file(brand_key: str, file: UploadFile = File(...), overwrite: b
             "hash": get_file_hash(file_path),
             "upload_date": datetime.now(timezone.utc).isoformat(),
             "status": "uploaded",
-            "brand": brand_key
+            "brand": brand_key,
+            "metadata": {"brand": brand_key} 
         }
 
         update_document_list(file_info)
@@ -924,35 +925,94 @@ async def query_endpoint(request: Request):
         )
     
 @app.post("/query/stream")
-async def stream_query_endpoint(request: Request, payload: dict = Body(...)):
-    async def generate():
-        question = payload.get("question", "")
-        thread_id = payload.get("thread_id")
-        user_id = payload.get("user_id")
-        brand_key = payload.get("brand_key")
+async def stream_query_endpoint(request: Request):
+    data = await request.json()
+    question = data.get("question", "")
+    thread_id = data.get("thread_id")
+    brand_key = data.get("brand_key", "default")
 
+    async def generate():
         if not question:
-            yield f"data: {json.dumps({'error': 'Question required'})}\n\n"
+            yield format_sse_message({
+                'error': 'Question required',
+                'status': 'error',
+                'timestamp': datetime.now().isoformat()
+            })
             return
-        
+
         logger.info(f"[THREAD ID]: {thread_id}")
 
         try:
-            async for chunk in request.app.state.processor.stream_query(
+            processor = request.app.state.processor
+            async for chunk in processor.stream_query(
                 question=question,
                 thread_id=thread_id,
-                user_id=user_id,
                 brand_key=brand_key
             ):
-                yield f"{chunk}\n\n"
+                # Handle the final metadata chunk
+                if isinstance(chunk, str) and chunk.startswith('{"status":'):
+                    try:
+                        metadata = json.loads(chunk.strip())
+                        # Flatten the metadata directly into the SSE message
+                        yield format_sse_message({
+                            'status': 'completed',
+                            'processing_time': metadata.get('processing_time'),
+                            'timestamp': metadata.get('timestamp'),
+                            'thread_id': metadata.get('thread_id'),
+                            'brand': metadata.get('brand'),
+                            'documents_retrieved': metadata.get('documents_retrieved'),
+                            'model': metadata.get('model'),
+                            'retrieval_time': metadata.get('retrieval_time'),
+                            'generation_time': metadata.get('generation_time')
+                        })
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to parse metadata chunk: {chunk}")
+                        continue
+                # Handle normal content chunks
+                elif isinstance(chunk, dict):
+                    if 'thread_id' not in chunk and thread_id:
+                        chunk['thread_id'] = thread_id
+
+                    if chunk.get('status') == 'complete':
+                        yield format_sse_message({
+                            'status': 'completed',
+                            'timestamp': chunk.get('timestamp', datetime.now().isoformat()),
+                            'thread_id': chunk.get('thread_id', thread_id)
+                        })
+                    elif 'text' in chunk:
+                        yield format_sse_message(chunk)
+                else:
+                    yield format_sse_message({
+                        'text': str(chunk),
+                        'status': 'in_progress',
+                        'timestamp': datetime.now().isoformat(),
+                        'thread_id': thread_id
+                    })
+
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            logger.error(f"Streaming error: {str(e)}", exc_info=True)
+            yield format_sse_message({
+                'error': 'Streaming failed',
+                'message': str(e),
+                'status': 'error',
+                'timestamp': datetime.now().isoformat(),
+                'thread_id': thread_id
+            })
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={'Cache-Control': 'no-cache'}
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
     )
+
+def format_sse_message(data: dict) -> str:
+    """Format data as Server-Sent Event"""
+    return f"data: {json.dumps(data)}\n\n"
+
 
 
 # ================ Vector Store Endpoints ================
@@ -1493,7 +1553,7 @@ async def _process_document_task(
         doc_logger.info(f"Extracted {len(text)} characters")
         doc_info["text_length"] = len(text)
         min_expected, max_expected = get_expected_faq_count(len(text))
-        doc_logger.info(f"Expecting {min_expected}-{max_expected} FAQs from this content")
+        # doc_logger.info(f"Expecting {min_expected}-{max_expected} FAQs from this content")
         doc_info["debug"]["expected_faqs"] = f"{min_expected}-{max_expected}"
 
         # Enhanced FAQ Processing with debugging capabilities
